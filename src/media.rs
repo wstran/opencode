@@ -132,14 +132,14 @@ pub enum Row {
 /// Lay metadata groups out as rows. The hex rows are appended by the caller,
 /// which knows how far the file runs.
 pub fn meta_rows(groups: &[crate::meta::Group]) -> Vec<Row> {
-    let mut rows = Vec::new();
+    let mut rows = vec![Row::Blank];
 
     for group in groups {
         if group.fields.is_empty() {
             continue;
         }
 
-        if !rows.is_empty() {
+        if rows.len() > 1 {
             rows.push(Row::Blank);
         }
 
@@ -175,7 +175,7 @@ pub fn hex_line(offset: u64, bytes: &[u8]) -> (String, String) {
         .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
         .collect();
 
-    (format!("{offset:08x}  {hex}"), format!("|{ascii}|"))
+    (format!("    {offset:08x}  {hex}"), format!("|{ascii}|"))
 }
 
 fn read_window(path: &Path, at: u64, len: usize) -> Result<Vec<u8>> {
@@ -593,7 +593,8 @@ mod tests {
     fn hex_line_pads_a_short_final_row() {
         let (hex, ascii) = hex_line(0x10, &[0x41, 0x00, 0x7e]);
 
-        assert!(hex.starts_with("00000010  41 00 7e"), "offset and bytes: {hex}");
+        // Indented to line up with the metadata fields above the dump.
+        assert!(hex.starts_with("    00000010  41 00 7e"), "offset and bytes: {hex}");
 
         // The short row still lines up with the full ones above it.
         let (full, _) = hex_line(0, &[0u8; HEX_COLS]);

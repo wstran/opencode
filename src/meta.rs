@@ -225,6 +225,8 @@ fn png(b: &Bytes) -> Vec<Group> {
 
     let mut text_group = Group::new("Text chunks");
 
+    let mut exif_groups = Vec::new();
+
     let mut chunks: Vec<String> = Vec::new();
 
     let mut at = 8;
@@ -302,6 +304,19 @@ fn png(b: &Bytes) -> Vec<Group> {
 
             b"iCCP" => image.put("Colour profile", "embedded ICC"),
 
+            b"sRGB" => image.put("Colour profile", "sRGB"),
+
+            b"PLTE" => image.put("Palette", format!("{} colours", len / 3)),
+
+            b"tRNS" => image.put("Transparency", "yes"),
+
+            // PNG can carry an EXIF block just as JPEG does.
+            b"eXIf" => {
+                if let Some(tiff) = b.slice(data_at, len) {
+                    exif_groups = exif(tiff);
+                }
+            }
+
             b"tEXt" | b"iTXt" | b"zTXt" => {
                 if let Some(data) = b.slice(data_at, len) {
                     let split = data.iter().position(|c| *c == 0).unwrap_or(data.len());
@@ -343,7 +358,11 @@ fn png(b: &Bytes) -> Vec<Group> {
         image.put("Chunks", chunks.join(" "));
     }
 
-    vec![image, text_group]
+    let mut out = vec![image, text_group];
+
+    out.extend(exif_groups);
+
+    out
 }
 
 fn png_colour(v: u8) -> &'static str {
@@ -451,6 +470,34 @@ fn jpeg(b: &Bytes) -> Vec<Group> {
                     if let Some(tiff) = b.slice(data_at + 6, data_len.saturating_sub(6)) {
                         exif_groups = exif(tiff);
                     }
+                }
+            }
+
+            // APP1 also carries XMP, under a namespace URI rather than "Exif".
+            0xe1 if b.slice(data_at, 4) == Some(b"http") => {
+                image.put("XMP", "embedded");
+            }
+
+            0xe2 if b.slice(data_at, 4) == Some(b"ICC_") => {
+                image.put("Colour profile", "embedded ICC");
+            }
+
+            // APP14 names the colour transform, which is how CMYK JPEGs and
+            // inverted Photoshop output are told apart.
+            0xee if b.slice(data_at, 5) == Some(b"Adobe") => {
+                if let Some(transform) = b.u8(data_at + 11) {
+                    image.put(
+                        "Adobe transform",
+                        match transform {
+                            0 => "none (CMYK or RGB)",
+
+                            1 => "YCbCr",
+
+                            2 => "YCCK",
+
+                            _ => "unknown",
+                        },
+                    );
                 }
             }
 
@@ -780,6 +827,13 @@ fn gif(b: &Bytes) -> Vec<Group> {
         g.put("Colour table", format!("{} colours", 1u32 << bits));
     }
 
+    // Each frame begins with an image descriptor, 0x2c.
+    let frames = b.0.iter().filter(|c| **c == 0x2c).count();
+
+    if frames > 1 {
+        g.put("Frames", frames.to_string());
+    }
+
     // NETSCAPE2.0 is what makes a GIF loop.
     if b.0.windows(11).any(|w| w == b"NETSCAPE2.0") {
         g.put("Animation", "looping");
@@ -798,6 +852,21 @@ fn bmp(b: &Bytes) -> Vec<Group> {
     if let Some(bpp) = b.u16(28, false) {
         g.put("Bit depth", format!("{bpp}-bit"));
     }
+
+    g.put_opt(
+        "Compression",
+        b.u32(30, false).map(|c| match c {
+            0 => "none".to_string(),
+
+            1 => "RLE 8-bit".to_string(),
+
+            2 => "RLE 4-bit".to_string(),
+
+            3 => "bitfields".to_string(),
+
+            n => format!("method {n}"),
+        }),
+    );
 
     vec![g]
 }
@@ -863,6 +932,8 @@ fn webp(b: &Bytes) -> Vec<Group> {
 /// than only the prefix.
 fn mp4(path: &Path, head: &Bytes, byte_len: u64) -> Vec<Group> {
     let mut g = Group::new("Video");
+
+    let mut device = Group::new("Location");
 
     g.put_opt("Brand", head.slice(8, 4).map(four_cc));
 
@@ -964,10 +1035,177 @@ fn mp4(path: &Path, head: &Bytes, byte_len: u64) -> Vec<Group> {
             if !codecs.is_empty() {
                 g.put("Codecs", codecs.join(", "));
             }
+
+            g.put_opt(
+                "Tracks",
+                Some(b.0.windows(4).filter(|w| *w == b"trak").count())
+                    .filter(|n| *n > 0)
+                    .map(|n| n.to_string()),
+            );
+
+            let (tags, place) = mp4_tags(&b);
+
+            for (label, value) in tags {
+                g.put(label, value);
+            }
+
+            if let Some(place) = place {
+                device = place;
+            }
         }
     }
 
-    vec![g]
+    let mut out = vec![g];
+
+    if !device.is_empty() {
+        out.push(device);
+    }
+
+    out
+}
+
+/// Tags in a `udta/meta/ilst` box. Two layouts share it: the iTunes one keys
+/// entries by a four-character code, and the one Apple devices write keys them
+/// by index into a `keys` box. Both appear in files people actually have.
+fn mp4_tags(b: &Bytes) -> (Vec<(&'static str, String)>, Option<Group>) {
+    let mut tags = Vec::new();
+
+    let mut place = Group::new("Location");
+
+    let key_names = mp4_key_names(b);
+
+    let Some(ilst) = find_box(b, b"ilst") else {
+        return (tags, None);
+    };
+
+    let Some(total) = b.u32(ilst, true).map(|s| s as usize) else {
+        return (tags, None);
+    };
+
+    let end = (ilst + total).min(b.0.len());
+
+    let mut at = ilst + 8;
+
+    for _ in 0..128 {
+        if at + 8 > end {
+            break;
+        }
+
+        let Some(size) = b.u32(at, true).map(|s| s as usize) else { break };
+
+        let Some(kind) = b.slice(at + 4, 4) else { break };
+
+        if size < 8 {
+            break;
+        }
+
+        // Two shapes carry the value. MP4 wraps it in a nested `data` box (8
+        // bytes of header, then version/flags and locale). QuickTime stores it
+        // directly in the entry behind a 2-byte length and a 2-byte language.
+        let value = if b.slice(at + 12, 4) == Some(b"data") {
+            b.slice(at + 24, size.saturating_sub(24))
+        } else {
+            b.slice(at + 12, size.saturating_sub(12))
+        }
+        .map(text)
+        .filter(|v| !v.trim().is_empty());
+
+        if let Some(value) = value {
+            let name = if kind.starts_with(&[0xa9]) || kind == b"desc" {
+                four_cc(kind)
+            } else {
+                // Index into the keys box, one-based.
+                let idx = u32::from_be_bytes([kind[0], kind[1], kind[2], kind[3]]) as usize;
+
+                key_names.get(idx.wrapping_sub(1)).cloned().unwrap_or_default()
+            };
+
+            match name.trim_start_matches('.') {
+                n if n.ends_with("xyz") || n.contains("location.ISO6709") => {
+                    if let Some((lat, lon)) = iso6709(&value) {
+                        place.put("Coordinates", format!("{lat:.6}, {lon:.6}"));
+
+                        place.put("Note", "this file records where it was taken");
+                    }
+                }
+
+                n if n.ends_with("mak") || n.ends_with("make") => tags.push(("Make", value)),
+
+                n if n.ends_with("mod") || n.ends_with("model") => tags.push(("Model", value)),
+
+                n if n.ends_with("swr") || n.ends_with("software") => tags.push(("Software", value)),
+
+                n if n.ends_with("nam") || n.ends_with("title") => tags.push(("Title", value)),
+
+                n if n.ends_with("ART") || n.ends_with("artist") => tags.push(("Artist", value)),
+
+                n if n.ends_with("day") || n.ends_with("creationdate") => tags.push(("Recorded", value)),
+
+                _ => {}
+            }
+        }
+
+        at += size;
+    }
+
+    (tags, (!place.is_empty()).then_some(place))
+}
+
+/// The `keys` box names the tags that the indexed `ilst` layout refers to.
+fn mp4_key_names(b: &Bytes) -> Vec<String> {
+    let mut names = Vec::new();
+
+    let Some(keys) = find_box(b, b"keys") else {
+        return names;
+    };
+
+    let Some(count) = b.u32(keys + 12, true) else {
+        return names;
+    };
+
+    let mut at = keys + 16;
+
+    for _ in 0..count.min(128) {
+        let Some(size) = b.u32(at, true).map(|s| s as usize) else { break };
+
+        if size < 8 {
+            break;
+        }
+
+        names.push(b.slice(at + 8, size - 8).map(text).unwrap_or_default());
+
+        at += size;
+    }
+
+    names
+}
+
+/// ISO 6709, as `+37.7749-122.4194+010.000/`: signed decimal degrees run
+/// together, latitude first.
+fn iso6709(s: &str) -> Option<(f64, f64)> {
+    let body = s.trim().trim_end_matches('/');
+
+    let mut parts: Vec<String> = Vec::new();
+
+    let mut current = String::new();
+
+    for c in body.chars() {
+        if (c == '+' || c == '-') && !current.is_empty() {
+            parts.push(std::mem::take(&mut current));
+        }
+
+        current.push(c);
+    }
+
+    if !current.is_empty() {
+        parts.push(current);
+    }
+
+    let lat = parts.first()?.parse::<f64>().ok()?;
+
+    let lon = parts.get(1)?.parse::<f64>().ok()?;
+
+    Some((lat, lon))
 }
 
 /// Locate a four-character box type anywhere in a buffer. Boxes are nested, and
@@ -989,12 +1227,14 @@ fn duration_text(secs: f64) -> String {
 }
 
 /// QuickTime timestamps count from 1904; convert to the Unix epoch and format.
+/// Marked UTC because that is what the field holds: a viewer in another zone
+/// would otherwise read its own wall-clock time back and think it wrong.
 fn mac_time(secs: u64) -> Option<String> {
     const EPOCH_DELTA: u64 = 2_082_844_800;
 
     let unix = secs.checked_sub(EPOCH_DELTA)?;
 
-    Some(civil_from_unix(unix))
+    Some(format!("{} UTC", civil_from_unix(unix)))
 }
 
 /// Days-since-epoch to a calendar date, so no date dependency is needed.
@@ -1035,11 +1275,27 @@ fn pdf(b: &Bytes) -> Vec<Group> {
         g.put("Encrypted", "yes");
     }
 
+    // Every page object is typed, so counting them is a fair estimate without
+    // resolving the page tree.
+    let pages = b.0.windows(10).filter(|w| *w == b"/Type /Pag" || *w == b"/Type/Page").count();
+
+    if pages > 0 {
+        g.put("Pages", format!("about {pages}"));
+    }
+
+    if b.0.windows(8).any(|w| w == b"/Linear") {
+        g.put("Linearised", "yes (streams from the first page)");
+    }
+
     for (needle, label) in [
         (&b"/Title ("[..], "Title"),
         (&b"/Author ("[..], "Author"),
         (&b"/Producer ("[..], "Producer"),
         (&b"/Creator ("[..], "Creator"),
+        (&b"/CreationDate ("[..], "Created"),
+        (&b"/ModDate ("[..], "Modified"),
+        (&b"/Keywords ("[..], "Keywords"),
+        (&b"/Subject ("[..], "Subject"),
     ] {
         if let Some(pos) = b.0.windows(needle.len()).position(|w| w == needle) {
             let start = pos + needle.len();
@@ -1047,12 +1303,45 @@ fn pdf(b: &Bytes) -> Vec<Group> {
             let end = b.0[start..].iter().position(|c| *c == b')').unwrap_or(0);
 
             if end > 0 {
-                g.put_opt(label, b.slice(start, end).and_then(pdf_text));
+                let raw = b.slice(start, end).and_then(pdf_text);
+
+                // PDF dates look like D:20240131120000+07'00'.
+                let value = match label {
+                    "Created" | "Modified" => raw.map(|d| pdf_date(&d)),
+
+                    _ => raw,
+                };
+
+                g.put_opt(label, value);
             }
         }
     }
 
     vec![g]
+}
+
+/// `D:YYYYMMDDHHmmSS+hh'mm'` is legible once the punctuation is put back.
+fn pdf_date(raw: &str) -> String {
+    let digits: Vec<char> = raw.trim_start_matches("D:").chars().collect();
+
+    if digits.len() < 14 || !digits[..14].iter().all(|c| c.is_ascii_digit()) {
+        return raw.to_string();
+    }
+
+    let at = |a: usize, b: usize| -> String { digits[a..b].iter().collect() };
+
+    let zone: String = digits[14..].iter().filter(|c| **c != '\'').collect();
+
+    format!(
+        "{}-{}-{} {}:{}:{}{}",
+        at(0, 4),
+        at(4, 6),
+        at(6, 8),
+        at(8, 10),
+        at(10, 12),
+        at(12, 14),
+        if zone.trim().is_empty() { String::new() } else { format!(" {}", zone.trim()) }
+    )
 }
 
 fn zip(path: &Path, byte_len: u64) -> Vec<Group> {
@@ -1095,8 +1384,25 @@ fn gzip(b: &Bytes) -> Vec<Group> {
     }
 
     if let Some(mtime) = b.u32(4, false).filter(|t| *t > 0) {
-        g.put("Modified", civil_from_unix(u64::from(mtime)));
+        g.put("Modified", format!("{} UTC", civil_from_unix(u64::from(mtime))));
     }
+
+    g.put_opt(
+        "Created on",
+        b.u8(9).map(|os| match os {
+            0 => "FAT filesystem".to_string(),
+
+            3 => "Unix".to_string(),
+
+            7 => "Macintosh".to_string(),
+
+            11 => "NTFS".to_string(),
+
+            255 => "unknown".to_string(),
+
+            n => format!("system {n}"),
+        }),
+    );
 
     vec![g]
 }
@@ -1142,6 +1448,24 @@ fn elf(b: &Bytes) -> Vec<Group> {
         }),
     );
 
+    let sixty_four = b.u8(4) == Some(2);
+
+    let entry = if sixty_four { b.u64(24, big) } else { b.u32(24, big).map(u64::from) };
+
+    g.put_opt("Entry point", entry.filter(|e| *e > 0).map(|e| format!("{e:#x}")));
+
+    // The header offsets differ by class, so the counts move with it.
+    let (ph_at, sh_at) = if sixty_four { (56, 60) } else { (44, 48) };
+
+    g.put_opt("Segments", b.u16(ph_at, big).map(|n| n.to_string()));
+
+    g.put_opt("Sections", b.u16(sh_at, big).map(|n| n.to_string()));
+
+    // A dynamically linked executable names its loader in a PT_INTERP segment.
+    if let Some(pos) = b.0.windows(4).position(|w| w == b"/lib") {
+        g.put_opt("Interpreter", b.slice(pos, 64).map(text));
+    }
+
     vec![g]
 }
 
@@ -1178,7 +1502,68 @@ fn macho(b: &Bytes) -> Vec<Group> {
         }),
     );
 
+    g.put_opt("Load commands", b.u32(16, false).map(|n| n.to_string()));
+
+    // Walk the load commands for the two that identify a build.
+    let mut at = if sixty_four { 32 } else { 28 };
+
+    let count = b.u32(16, false).unwrap_or(0).min(512);
+
+    for _ in 0..count {
+        let (Some(cmd), Some(size)) = (b.u32(at, false), b.u32(at + 4, false)) else { break };
+
+        if size < 8 {
+            break;
+        }
+
+        match cmd {
+            // LC_UUID
+            0x1b => {
+                if let Some(raw) = b.slice(at + 8, 16) {
+                    let hex: String = raw.iter().map(|x| format!("{x:02x}")).collect();
+
+                    g.put("UUID", hex);
+                }
+            }
+
+            // LC_BUILD_VERSION carries the platform and minimum OS.
+            0x32 => {
+                if let (Some(platform), Some(minos)) = (b.u32(at + 8, false), b.u32(at + 12, false)) {
+                    let name = match platform {
+                        1 => "macOS",
+
+                        2 => "iOS",
+
+                        3 => "tvOS",
+
+                        4 => "watchOS",
+
+                        n => return finish(g, format!("platform {n}"), minos),
+                    };
+
+                    g.put("Minimum OS", format!("{name} {}", version_xyz(minos)));
+                }
+            }
+
+            _ => {}
+        }
+
+        at += size as usize;
+    }
+
     vec![g]
+}
+
+/// Late exit for an unknown Mach-O platform: still report the version.
+fn finish(mut g: Group, platform: String, minos: u32) -> Vec<Group> {
+    g.put("Minimum OS", format!("{platform} {}", version_xyz(minos)));
+
+    vec![g]
+}
+
+/// Mach-O packs a version as xxxx.yy.zz into 32 bits.
+fn version_xyz(v: u32) -> String {
+    format!("{}.{}.{}", v >> 16, (v >> 8) & 0xff, v & 0xff)
 }
 
 fn wasm(b: &Bytes) -> Vec<Group> {
@@ -1213,6 +1598,32 @@ fn wasm(b: &Bytes) -> Vec<Group> {
 
     if !seen.is_empty() {
         g.put("Sections", seen.join(" "));
+    }
+
+    // Import and export sections start with a count, which says more about a
+    // module than the section names alone.
+    for (id, label) in [(2u8, "Imports"), (7, "Exports")] {
+        let mut at = 8;
+
+        for _ in 0..64 {
+            let Some(section) = b.u8(at) else { break };
+
+            let Some((len, used)) = uleb(b, at + 1) else { break };
+
+            if section == id {
+                if let Some((count, _)) = uleb(b, at + 1 + used) {
+                    g.put(label, count.to_string());
+                }
+
+                break;
+            }
+
+            let Some(next) = at.checked_add(1 + used).and_then(|n| n.checked_add(len as usize)) else {
+                break;
+            };
+
+            at = next;
+        }
     }
 
     vec![g]
@@ -1283,6 +1694,16 @@ fn id3(b: &Bytes) -> Vec<Group> {
 
             b"TRCK" => Some("Track"),
 
+            b"TPE2" => Some("Album artist"),
+
+            b"TCOM" => Some("Composer"),
+
+            b"TPUB" => Some("Publisher"),
+
+            b"COMM" => Some("Comment"),
+
+            b"TSSE" => Some("Encoder"),
+
             _ => None,
         };
 
@@ -1298,7 +1719,73 @@ fn id3(b: &Bytes) -> Vec<Group> {
         at = next;
     }
 
-    vec![g]
+    let mut audio = mpeg_frame(b, end);
+
+    if audio.is_empty() {
+        return vec![g];
+    }
+
+    audio.title = "Audio".to_string();
+
+    vec![g, audio]
+}
+
+/// The first MPEG audio frame header after the tag gives the bit rate, sample
+/// rate and channel mode. Only MPEG-1 Layer III is decoded, which is what an
+/// .mp3 in practice is.
+fn mpeg_frame(b: &Bytes, from: usize) -> Group {
+    let mut g = Group::new("Audio");
+
+    const BITRATES: [u32; 15] = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+
+    const RATES: [u32; 3] = [44_100, 48_000, 32_000];
+
+    // Scan a bounded window for the frame sync.
+    for at in from..(from + 8192).min(b.0.len().saturating_sub(4)) {
+        if b.u8(at) != Some(0xff) {
+            continue;
+        }
+
+        let (Some(h1), Some(h2), Some(h3)) = (b.u8(at + 1), b.u8(at + 2), b.u8(at + 3)) else {
+            break;
+        };
+
+        // 11 sync bits, MPEG-1 (0b11), Layer III (0b01).
+        if h1 & 0xe0 != 0xe0 || (h1 >> 3) & 0b11 != 0b11 || (h1 >> 1) & 0b11 != 0b01 {
+            continue;
+        }
+
+        let bitrate = BITRATES.get((h2 >> 4) as usize).copied().unwrap_or(0);
+
+        let rate = RATES.get(((h2 >> 2) & 0b11) as usize).copied().unwrap_or(0);
+
+        if bitrate == 0 || rate == 0 {
+            continue;
+        }
+
+        g.put("Format", "MPEG-1 Layer III");
+
+        g.put("Bit rate", format!("{bitrate} kbps"));
+
+        g.put("Sample rate", format!("{rate} Hz"));
+
+        g.put(
+            "Channels",
+            match (h3 >> 6) & 0b11 {
+                0 => "stereo",
+
+                1 => "joint stereo",
+
+                2 => "dual channel",
+
+                _ => "mono",
+            },
+        );
+
+        break;
+    }
+
+    g
 }
 
 fn flac(b: &Bytes) -> Vec<Group> {
@@ -1326,7 +1813,106 @@ fn flac(b: &Bytes) -> Vec<Group> {
         g.put("Channels", (((byte >> 1) & 0b111) + 1).to_string());
     }
 
-    vec![g]
+    // Bit depth straddles two bytes: five bits, stored minus one.
+    if let (Some(lo), Some(hi)) = (b.u8(20), b.u8(21)) {
+        let depth = (((u16::from(lo) & 0b1) << 4) | (u16::from(hi) >> 4)) + 1;
+
+        g.put("Bit depth", format!("{depth}-bit"));
+    }
+
+    let mut tags = flac_tags(b);
+
+    if tags.is_empty() {
+        return vec![g];
+    }
+
+    tags.title = "Tags".to_string();
+
+    vec![g, tags]
+}
+
+/// FLAC metadata blocks follow the magic: a one-byte header whose top bit marks
+/// the last block, then a 24-bit length. Block type 4 is the Vorbis comment.
+fn flac_tags(b: &Bytes) -> Group {
+    let mut g = Group::new("Tags");
+
+    let mut at = 4;
+
+    for _ in 0..32 {
+        let Some(header) = b.u8(at) else { break };
+
+        let kind = header & 0x7f;
+
+        let last = header & 0x80 != 0;
+
+        let Some(len) = (|| {
+            Some(
+                (u32::from(b.u8(at + 1)?) << 16)
+                    | (u32::from(b.u8(at + 2)?) << 8)
+                    | u32::from(b.u8(at + 3)?),
+            )
+        })() else {
+            break;
+        };
+
+        if kind == 4 {
+            let body_at = at + 4;
+
+            // A vendor string, then a count, then `KEY=value` entries, all
+            // length-prefixed little-endian.
+            let Some(vendor) = b.u32(body_at, false) else { break };
+
+            let mut p = body_at + 4 + vendor as usize;
+
+            let Some(count) = b.u32(p, false) else { break };
+
+            p += 4;
+
+            for _ in 0..count.min(64) {
+                let Some(size) = b.u32(p, false) else { break };
+
+                let Some(raw) = b.slice(p + 4, size as usize) else { break };
+
+                let entry = text(raw);
+
+                if let Some((key, value)) = entry.split_once('=') {
+                    let label = match key.to_ascii_uppercase().as_str() {
+                        "TITLE" => "Title",
+
+                        "ARTIST" => "Artist",
+
+                        "ALBUM" => "Album",
+
+                        "DATE" => "Date",
+
+                        "GENRE" => "Genre",
+
+                        "TRACKNUMBER" => "Track",
+
+                        _ => {
+                            p += 4 + size as usize;
+
+                            continue;
+                        }
+                    };
+
+                    g.put_opt(label, Some(value.to_string()));
+                }
+
+                p += 4 + size as usize;
+            }
+
+            break;
+        }
+
+        if last {
+            break;
+        }
+
+        at += 4 + len as usize;
+    }
+
+    g
 }
 
 fn sqlite(b: &Bytes) -> Vec<Group> {
@@ -1347,6 +1933,26 @@ fn sqlite(b: &Bytes) -> Vec<Group> {
         g.put("Written by", format!("SQLite {}.{}.{}", v / 1_000_000, (v / 1000) % 1000, v % 1000));
     }
 
+    g.put_opt(
+        "Encoding",
+        b.u32(56, true).map(|e| match e {
+            1 => "UTF-8".to_string(),
+
+            2 => "UTF-16 little endian".to_string(),
+
+            3 => "UTF-16 big endian".to_string(),
+
+            n => format!("encoding {n}"),
+        }),
+    );
+
+    // Table definitions are stored verbatim in the schema.
+    let tables = b.0.windows(12).filter(|w| w.eq_ignore_ascii_case(b"CREATE TABLE")).count();
+
+    if tables > 0 {
+        g.put("Tables", format!("at least {tables}"));
+    }
+
     vec![g]
 }
 
@@ -1358,6 +1964,23 @@ fn font(b: &Bytes) -> Vec<Group> {
     let Some(tables) = b.u16(4, true) else { return vec![g] };
 
     g.put("Tables", tables.to_string());
+
+    for i in 0..tables.min(256) as usize {
+        let rec = 12 + i * 16;
+
+        let Some(tag) = b.slice(rec, 4) else { break };
+
+        let Some(off) = b.u32(rec + 8, true).map(|v| v as usize) else { break };
+
+        match tag {
+            // head: the design grid the outlines are drawn on.
+            b"head" => g.put_opt("Units per em", b.u16(off + 18, true).map(|v| v.to_string())),
+
+            b"maxp" => g.put_opt("Glyphs", b.u16(off + 4, true).map(|v| v.to_string())),
+
+            _ => {}
+        }
+    }
 
     // Find the name table, then pull the family and subfamily records.
     for i in 0..tables.min(256) as usize {
@@ -1437,6 +2060,7 @@ mod tests {
     }
 
 
+
     #[test]
     fn reads_png_header() {
         let bytes = png_fixture();
@@ -1479,6 +2103,12 @@ mod tests {
             b"OTTO",
         ];
 
+        let dir = std::env::temp_dir().join(format!("ocode_fuzz_{}", std::process::id()));
+
+        let _ = fs::create_dir_all(&dir);
+
+        let scratch = dir.join("scratch.bin");
+
         // A cheap deterministic pattern generator: no rand dependency, but it
         // still walks every parser over bytes it was not expecting.
         for magic in magics {
@@ -1501,9 +2131,18 @@ mod tests {
                     let slice = &bytes[..cut.min(bytes.len())];
 
                     let _ = describe(Path::new("x.bin"), slice, slice.len() as u64);
+
+                    // Some readers seek through the file rather than the prefix
+                    // (a video's moov box, a zip's central directory), so the
+                    // same garbage has to be reachable on disk too.
+                    fs::write(&scratch, slice).unwrap();
+
+                    let _ = describe(&scratch, slice, slice.len() as u64);
                 }
             }
         }
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1511,6 +2150,72 @@ mod tests {
         for bad in [&b""[..], b"MM", b"MM\0\x2a", b"II\x2a\0\xff\xff\xff\xff", b"XX\0\0"] {
             let _ = exif(bad);
         }
+    }
+
+    /// Build one MP4 box: size, type, payload.
+    fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+
+        out.extend_from_slice(kind);
+
+        out.extend_from_slice(payload);
+
+        out
+    }
+
+    /// A video that records where it was shot, in the shape Apple devices
+    /// write. Synthesised because no such file is guaranteed to be around.
+    #[test]
+    fn reads_a_video_that_records_where_it_was_taken() {
+        let coords = b"+21.0278+105.8342+010.000/";
+
+        // MP4 form: the value hides in a nested `data` box.
+        let data = boxed(b"data", &[&[0, 0, 0, 1, 0, 0, 0, 0][..], coords].concat());
+
+        let ilst = boxed(b"ilst", &boxed(b"\xa9xyz", &data));
+
+        let make = boxed(b"ilst", &boxed(b"\xa9mak", &boxed(b"data", &[&[0, 0, 0, 1, 0, 0, 0, 0][..], b"Apple"].concat())));
+
+        let meta = boxed(b"meta", &[&[0u8, 0, 0, 0][..], &ilst, &make].concat());
+
+        let moov = boxed(b"moov", &boxed(b"udta", &meta));
+
+        let mut file = boxed(b"ftyp", b"qt  \0\0\0\0");
+
+        file.extend_from_slice(&moov);
+
+        let dir = std::env::temp_dir().join(format!("ocode_gps_{}", std::process::id()));
+
+        let _ = fs::create_dir_all(&dir);
+
+        let path = dir.join("clip.mp4");
+
+        fs::write(&path, &file).unwrap();
+
+        let groups = describe(&path, &file, file.len() as u64);
+
+        let coords = find(&groups, "Location", "Coordinates").unwrap_or_default();
+
+        assert!(coords.starts_with("21.027800, 105.834200"), "read the coordinates: {coords:?}");
+
+        assert!(
+            find(&groups, "Location", "Note").is_some(),
+            "and says plainly that the file records them"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parses_iso6709_coordinates() {
+        assert_eq!(iso6709("+21.0278+105.8342/"), Some((21.0278, 105.8342)));
+
+        // Southern and western hemispheres are negative.
+        assert_eq!(iso6709("-33.8688-151.2093+010.000/"), Some((-33.8688, -151.2093)));
+
+        assert_eq!(iso6709("not a location"), None);
+
+        assert_eq!(iso6709(""), None);
     }
 
     /// Regressions found by running the readers over real files.

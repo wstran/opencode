@@ -188,6 +188,7 @@ mod shots {
     }
 
 
+
     /// Regenerate the README pictures. Step one writes `docs/*.svg`:
     ///
     /// ```sh

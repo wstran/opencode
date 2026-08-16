@@ -196,21 +196,27 @@ What gets read, all parsed in-tree with no extra dependency:
 
 | Format | Reported |
 |--------|----------|
-| PNG | dimensions, bit depth, colour type, interlace, DPI, gamma, ICC, APNG frames, text chunks |
-| JPEG | dimensions, precision, components, encoding, density, comment, and **EXIF**: camera, lens, shutter, aperture, ISO, focal length, orientation, dates, **GPS** |
-| GIF / BMP / WebP | version, dimensions, colour table, looping, encoding, alpha |
-| MP4 / MOV | duration, dimensions, codecs, creation time, brand |
-| PDF | version, title, author, producer, creator, whether it is encrypted |
-| ZIP / gzip | entries, directory size, comment, original name, timestamp |
-| ELF / Mach-O | class, byte order, type, architecture |
-| WebAssembly | version, sections present |
-| MP3 / FLAC | ID3 title, artist, album, year; sample rate, channels, duration |
-| TrueType / OpenType | family, style, version, table count |
-| SQLite | page size, page count, writer version |
+| PNG | dimensions, bit depth, colour type, interlace, DPI, gamma, palette, transparency, ICC or sRGB, APNG frames, text chunks, and EXIF when present |
+| JPEG | dimensions, precision, components, encoding, density, comment, XMP and ICC presence, Adobe transform, and **EXIF**: camera, lens, shutter, aperture, ISO, focal length, orientation, dates, **GPS** |
+| GIF | version, dimensions, colour table, frame count, looping |
+| BMP / WebP | dimensions, bit depth, compression, encoding, alpha and animation flags |
+| MP4 / MOV | duration, dimensions, codecs, track count, creation time, brand, and the tags a camera writes: **location**, make, model, software, title, recording date |
+| PDF | version, page count, title, author, subject, keywords, producer, creator, dates, linearised, encrypted |
+| ZIP / gzip | entries, directory size, comment, original name, timestamp, originating system |
+| ELF | class, byte order, type, machine, entry point, segments, sections, interpreter |
+| Mach-O | class, architecture, type, load commands, UUID, minimum OS |
+| WebAssembly | version, sections, import and export counts |
+| MP3 | ID3 title, artist, album artist, album, year, genre, track, composer, publisher, comment, encoder, plus bit rate, sample rate and channel mode from the audio itself |
+| FLAC | sample rate, channels, bit depth, duration, and the Vorbis comment tags |
+| TrueType / OpenType | family, style, version, tables, units per em, glyph count |
+| SQLite | page size, page count, writer version, text encoding, table count |
 
-That EXIF block is the reason this exists: photos routinely carry the
-coordinates where they were taken and the serial number of the camera, and this
-is a quick way to see what a file is about to tell everyone you send it to.
+The location fields are the reason this exists. Photos routinely carry the
+coordinates where they were taken, and so do videos from a phone, which is
+worth seeing before you send one on. Timestamps that are stored as an instant
+are labelled UTC, because a file written at 21:22 in Hanoi holds 14:22 and
+reads as wrong otherwise; EXIF dates are left as they are, since the format
+defines them as local camera time with no zone.
 
 Reading never writes, so nothing here can strip a file's metadata the way some
 viewers do when they re-save. Every parser walks untrusted bytes with checked

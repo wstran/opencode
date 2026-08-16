@@ -516,7 +516,9 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: UiPalette
         return;
     }
 
-    app.media_rows = height;
+    let body = height.saturating_sub(1).max(1);
+
+    app.media_rows = body;
 
     let (mut meta, hex_rows) = match &app.media {
         Some(Media::Binary(doc)) => (media::meta_rows(&doc.meta), doc.hex_rows()),
@@ -526,15 +528,17 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: UiPalette
         None => return,
     };
 
-    // Breathing room before the dump starts.
-    if hex_rows > 0 && !meta.is_empty() {
+    // Head the dump like any other block, so it does not begin abruptly.
+    if hex_rows > 0 {
         meta.push(media::Row::Blank);
+
+        meta.push(media::Row::Title("Bytes".to_string()));
     }
 
     let total = meta.len() as u64 + hex_rows;
 
     // Keep the last screenful reachable but never scroll past the end.
-    let max_scroll = total.saturating_sub(height as u64);
+    let max_scroll = total.saturating_sub(body as u64);
 
     app.media_scroll = app.media_scroll.min(max_scroll);
 
@@ -544,7 +548,7 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: UiPalette
     if let Some(Media::Binary(doc)) = app.media.as_mut() {
         let hex_first = first.saturating_sub(meta.len() as u64);
 
-        doc.ensure_window(hex_first, height + 1);
+        doc.ensure_window(hex_first, body + 1);
     }
 
     let label = Style::default().fg(pal.dim);
@@ -565,9 +569,9 @@ fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: UiPalette
         .unwrap_or(0)
         .min(18);
 
-    let mut lines: Vec<Line> = Vec::with_capacity(height);
+    let mut lines: Vec<Line> = Vec::with_capacity(body);
 
-    for i in 0..height as u64 {
+    for i in 0..body as u64 {
         let row = first + i;
 
         if row >= total {
