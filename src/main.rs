@@ -4,6 +4,7 @@ mod comment;
 mod config;
 mod highlight;
 mod media;
+mod meta;
 mod shot;
 mod tree;
 mod ui;

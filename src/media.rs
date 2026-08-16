@@ -17,7 +17,14 @@ const MAX_DIM: u32 = 1000;
 /// Bytes sniffed to classify a file (and, for binaries, to hex-preview).
 const SNIFF: usize = 8192;
 
-const HEX_PREVIEW: usize = 256;
+/// Bytes read for metadata. Larger than the classify sniff because a JPEG's
+/// EXIF block alone can run to tens of kilobytes.
+const META_PREFIX: usize = 64 * 1024;
+
+/// Bytes per hex row, and how much is pulled off disk around the visible rows
+/// so scrolling does not hit the file on every frame.
+pub const HEX_COLS: usize = 16;
+const HEX_WINDOW: usize = 64 * 1024;
 
 /// base64 chunk size for the kitty protocol — must be ≤4096 and a multiple of
 /// 4 so each chunk stays on a base64 boundary.
@@ -40,6 +47,8 @@ pub struct ImageDoc {
 
     pub height: u32,
 
+    pub meta: Vec<crate::meta::Group>,
+
     /// Re-encoded PNG, base64'd straight into the kitty escape.
     png: Vec<u8>,
 }
@@ -51,7 +60,148 @@ pub struct BinaryDoc {
 
     pub byte_len: u64,
 
-    pub head: Vec<u8>,
+    pub meta: Vec<crate::meta::Group>,
+
+    /// Bytes currently held for the hex view, and the offset they start at.
+    /// The file is never loaded whole: only a window around what is on screen,
+    /// so a multi-gigabyte file costs the same as a small one.
+    window: Vec<u8>,
+
+    window_at: u64,
+}
+
+impl BinaryDoc {
+    /// Number of 16-byte rows the whole file occupies.
+    pub fn hex_rows(&self) -> u64 {
+        self.byte_len.div_ceil(HEX_COLS as u64)
+    }
+
+    /// Make sure `rows` rows starting at `first_row` are in memory. Reads only
+    /// when the request falls outside what is already held.
+    pub fn ensure_window(&mut self, first_row: u64, rows: usize) {
+        let want_at = first_row.saturating_mul(HEX_COLS as u64);
+
+        let want_len = rows.saturating_mul(HEX_COLS);
+
+        let have_end = self.window_at + self.window.len() as u64;
+
+        if want_at >= self.window_at && want_at + want_len as u64 <= have_end {
+            return;
+        }
+
+        // Centre the window on the request so scrolling either way stays cheap.
+        let back = (HEX_WINDOW.saturating_sub(want_len) / 2) as u64;
+
+        let at = want_at.saturating_sub(back);
+
+        if let Ok(bytes) = read_window(&self.path, at, HEX_WINDOW.max(want_len)) {
+            self.window = bytes;
+
+            self.window_at = at;
+        }
+    }
+
+    /// The bytes of one hex row, or an empty slice when they are not loaded.
+    pub fn hex_row(&self, row: u64) -> &[u8] {
+        let at = row.saturating_mul(HEX_COLS as u64);
+
+        let Some(rel) = at.checked_sub(self.window_at) else {
+            return &[];
+        };
+
+        let rel = rel as usize;
+
+        let end = (rel + HEX_COLS).min(self.window.len());
+
+        self.window.get(rel..end).unwrap_or(&[])
+    }
+}
+
+/// One rendered row of the inspector, tagged so the renderer can colour it
+/// without re-deciding what it is looking at.
+pub enum Row {
+    /// Group heading, e.g. "Camera".
+    Title(String),
+
+    /// A `label: value` pair.
+    Field(String, String),
+
+    Blank,
+}
+
+/// Lay metadata groups out as rows. The hex rows are appended by the caller,
+/// which knows how far the file runs.
+pub fn meta_rows(groups: &[crate::meta::Group]) -> Vec<Row> {
+    let mut rows = Vec::new();
+
+    for group in groups {
+        if group.fields.is_empty() {
+            continue;
+        }
+
+        if !rows.is_empty() {
+            rows.push(Row::Blank);
+        }
+
+        rows.push(Row::Title(group.title.clone()));
+
+        for (label, value) in &group.fields {
+            rows.push(Row::Field(label.clone(), value.clone()));
+        }
+    }
+
+    rows
+}
+
+/// Printable rendering of a hex row's bytes: `hex bytes  |ascii|`.
+pub fn hex_line(offset: u64, bytes: &[u8]) -> (String, String) {
+    let mut hex = String::with_capacity(HEX_COLS * 3 + 1);
+
+    for i in 0..HEX_COLS {
+        // A blank gutter down the middle keeps the eye on 8-byte boundaries.
+        if i == HEX_COLS / 2 {
+            hex.push(' ');
+        }
+
+        match bytes.get(i) {
+            Some(b) => hex.push_str(&format!("{b:02x} ")),
+
+            None => hex.push_str("   "),
+        }
+    }
+
+    let ascii: String = bytes
+        .iter()
+        .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+        .collect();
+
+    (format!("{offset:08x}  {hex}"), format!("|{ascii}|"))
+}
+
+fn read_window(path: &Path, at: u64, len: usize) -> Result<Vec<u8>> {
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = fs::File::open(path)?;
+
+    file.seek(SeekFrom::Start(at))?;
+
+    let mut buf = vec![0u8; len];
+
+    let mut filled = 0;
+
+    while filled < len {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break,
+
+            Ok(n) => filled += n,
+
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    buf.truncate(filled);
+
+    Ok(buf)
 }
 
 pub enum Loaded {
@@ -83,13 +233,23 @@ pub fn classify(path: &Path) -> Result<Loaded> {
 
     let format = describe_binary(path, &prefix);
 
-    prefix.truncate(HEX_PREVIEW);
+    // Re-read a longer prefix for the metadata readers; the sniff window is
+    // sized for classification, not for a JPEG's EXIF block.
+    if prefix.len() == SNIFF && byte_len > SNIFF as u64 {
+        if let Ok(longer) = read_prefix(path, META_PREFIX) {
+            prefix = longer;
+        }
+    }
+
+    let meta = crate::meta::describe(path, &prefix, byte_len);
 
     Ok(Loaded::Media(Media::Binary(BinaryDoc {
         path: path.to_path_buf(),
         format,
         byte_len,
-        head: prefix,
+        meta,
+        window: Vec::new(),
+        window_at: 0,
     })))
 }
 
@@ -129,13 +289,15 @@ fn decode_image(path: &Path, byte_len: u64, format: ImageFormat) -> Option<Image
 
     let img = image::load_from_memory_with_format(&bytes, format).ok()?;
 
-    let scaled = if img.width().max(img.height()) > MAX_DIM {
+    // Report the real dimensions, not the ones left after down-sampling for
+    // transmission: those are an artefact of the terminal, not of the file.
+    let (width, height) = (img.width(), img.height());
+
+    let scaled = if width.max(height) > MAX_DIM {
         img.resize(MAX_DIM, MAX_DIM, image::imageops::FilterType::Triangle)
     } else {
         img
     };
-
-    let (width, height) = (scaled.width(), scaled.height());
 
     let mut png = Vec::new();
 
@@ -147,6 +309,7 @@ fn decode_image(path: &Path, byte_len: u64, format: ImageFormat) -> Option<Image
         byte_len,
         width,
         height,
+        meta: crate::meta::describe(path, &bytes, byte_len),
         png,
     })
 }
@@ -381,6 +544,63 @@ mod tests {
         let (c, r) = fit_cells(100, 1000, 80, 24);
 
         assert!(c <= 80 && r <= 24 && r >= c);
+    }
+
+    /// The hex view must reach the end of a file far larger than any window,
+    /// reading the right bytes at whatever offset is asked for.
+    #[test]
+    fn hex_window_reads_any_offset_without_loading_the_file() {
+        let dir = std::env::temp_dir().join(format!("ocode_hex_{}", std::process::id()));
+
+        let _ = fs::create_dir_all(&dir);
+
+        let path = dir.join("big.bin");
+
+        // Larger than the read window, with a pattern that identifies any byte
+        // by its own offset.
+        let len = 300_000usize;
+
+        let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+
+        fs::write(&path, &data).unwrap();
+
+        let Loaded::Media(Media::Binary(mut doc)) = classify(&path).unwrap() else {
+            panic!("a file of bytes should not classify as text");
+        };
+
+        assert_eq!(doc.byte_len, len as u64);
+
+        assert_eq!(doc.hex_rows(), (len as u64).div_ceil(HEX_COLS as u64));
+
+        // Walk the start, the far end and back again: the window has to move
+        // both ways, and the bytes must still match the pattern.
+        for row in [0u64, 5, 10_000, doc.hex_rows() - 1, 3, 9_999] {
+            doc.ensure_window(row, 24);
+
+            let bytes = doc.hex_row(row);
+
+            let at = row as usize * HEX_COLS;
+
+            let want = &data[at..(at + HEX_COLS).min(len)];
+
+            assert_eq!(bytes, want, "row {row} at offset {at:#x}");
+        }
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hex_line_pads_a_short_final_row() {
+        let (hex, ascii) = hex_line(0x10, &[0x41, 0x00, 0x7e]);
+
+        assert!(hex.starts_with("00000010  41 00 7e"), "offset and bytes: {hex}");
+
+        // The short row still lines up with the full ones above it.
+        let (full, _) = hex_line(0, &[0u8; HEX_COLS]);
+
+        assert_eq!(hex.len(), full.len(), "short rows keep the column width");
+
+        assert_eq!(ascii, "|A.~|", "printable bytes only, the rest as dots");
     }
 
     #[test]

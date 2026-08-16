@@ -54,6 +54,17 @@ pub struct App {
     /// bumped alongside any assignment to `media`.
     media_epoch: u64,
 
+    /// First visible row of the media inspector (metadata, then the hex dump).
+    pub media_scroll: u64,
+
+    /// Whether an open image is showing its metadata instead of the picture.
+    /// Binaries always show the inspector, so this only applies to images.
+    pub media_info: bool,
+
+    /// Rows the inspector can show at once, recorded each render so paging and
+    /// clamping know the step.
+    pub media_rows: usize,
+
     pub tree: FileTree,
 
     pub highlighter: SyntaxHighlighter,
@@ -166,6 +177,9 @@ impl App {
             media,
             image_cells: None,
             media_epoch: 0,
+            media_scroll: 0,
+            media_info: false,
+            media_rows: 1,
             tree: FileTree::new(tree_root),
             highlighter,
             focus,
@@ -474,6 +488,20 @@ impl App {
     }
 
     fn on_editor_mouse(&mut self, ev: MouseEvent) {
+        // A media view has no caret to place, so the wheel drives the inspector
+        // and the other buttons do nothing.
+        if self.buffer.is_none() && self.media.is_some() {
+            match ev.kind {
+                MouseEventKind::ScrollUp => self.scroll_media(-EDITOR_SCROLL_STEP as i64),
+
+                MouseEventKind::ScrollDown => self.scroll_media(EDITOR_SCROLL_STEP as i64),
+
+                _ => {}
+            }
+
+            return;
+        }
+
         match ev.kind {
             MouseEventKind::ScrollUp => self.scroll_view(-EDITOR_SCROLL_STEP),
 
@@ -521,6 +549,16 @@ impl App {
         self.scroll_free = false;
     }
 
+    /// Scroll the media inspector. The renderer clamps against the real row
+    /// count, which it alone knows, so `u64::MAX` is a valid "go to the end".
+    fn scroll_media(&mut self, delta: i64) {
+        self.media_scroll = if delta < 0 {
+            self.media_scroll.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.media_scroll.saturating_add(delta as u64)
+        };
+    }
+
     fn scroll_view(&mut self, delta: isize) {
         let Some(buf) = self.buffer.as_mut() else {
             return;
@@ -552,6 +590,26 @@ impl App {
                 // Enter opens the browser only from the welcome screen — not
                 // while viewing an image / binary (also a no-buffer view).
                 KeyCode::Enter if self.on_welcome() && !self.tree_visible => self.show_tree(),
+
+                // A media view takes no typed text, so plain letters are free
+                // to act as commands here.
+                KeyCode::Char('i') | KeyCode::Char('I') if self.media.is_some() => {
+                    self.media_info = !self.media_info;
+
+                    self.media_scroll = 0;
+                }
+
+                KeyCode::Up => self.scroll_media(-1),
+
+                KeyCode::Down => self.scroll_media(1),
+
+                KeyCode::PageUp => self.scroll_media(-(self.media_rows as i64)),
+
+                KeyCode::PageDown => self.scroll_media(self.media_rows as i64),
+
+                KeyCode::Home => self.media_scroll = 0,
+
+                KeyCode::End => self.media_scroll = u64::MAX,
 
                 _ => {}
             }
@@ -792,6 +850,12 @@ impl App {
         self.media = media;
 
         self.media_epoch = self.media_epoch.wrapping_add(1);
+
+        // A new file starts at the top, showing the picture rather than the
+        // metadata it was last left on.
+        self.media_scroll = 0;
+
+        self.media_info = false;
 
         self.focus = Focus::Editor;
 

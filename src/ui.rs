@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use crate::app::{App, Focus};
 use crate::buffer::{self, Buffer};
 use crate::highlight::UiPalette;
-use crate::media::{self, BinaryDoc, Media};
+use crate::media::{self, Media};
 
 const TREE_WIDTH: u16 = 32;
 
@@ -487,7 +487,9 @@ fn render_editor(frame: &mut Frame, app: &mut App, area: Rect, pal: UiPalette) {
 }
 
 fn render_media(frame: &mut Frame, app: &mut App, area: Rect, pal: UiPalette) {
-    if matches!(app.media, Some(Media::Image(_))) {
+    let showing_picture = matches!(app.media, Some(Media::Image(_))) && !app.media_info;
+
+    if showing_picture {
         // Leave the area blank; the run loop paints the image into it. This is
         // the editor pane, so it already sits clear of the sidebar and the
         // image is simply scaled into whatever width is left.
@@ -499,59 +501,113 @@ fn render_media(frame: &mut Frame, app: &mut App, area: Rect, pal: UiPalette) {
 
     app.image_cells = None;
 
-    if let Some(Media::Binary(doc)) = &app.media {
-        render_binary_info(frame, doc, area, pal);
-    }
+    render_inspector(frame, app, area, pal);
 }
 
-fn render_binary_info(frame: &mut Frame, doc: &BinaryDoc, area: Rect, pal: UiPalette) {
-    let name = doc.path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+/// Metadata groups followed by the whole file in hex, as one scrollable page.
+/// Only the visible rows are built, and for a binary only those bytes are read,
+/// so opening a huge file costs the same as a small one.
+fn render_inspector(frame: &mut Frame, app: &mut App, area: Rect, pal: UiPalette) {
+    let height = area.height as usize;
 
-    let mut lines: Vec<Line> = vec![Line::from("")];
+    let width = area.width as usize;
 
-    lines.push(Line::from(Span::styled(
-        format!("  {name}"),
-        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-    )));
+    if height == 0 || width == 0 {
+        return;
+    }
 
-    lines.push(Line::from(Span::styled(
-        format!("  {} · {}", doc.format, media::human_size(doc.byte_len)),
-        Style::default().fg(pal.fg),
-    )));
+    app.media_rows = height;
 
-    lines.push(Line::from(""));
+    let (mut meta, hex_rows) = match &app.media {
+        Some(Media::Binary(doc)) => (media::meta_rows(&doc.meta), doc.hex_rows()),
 
-    lines.push(Line::from(Span::styled(
-        "  Not text — hex preview of the first bytes:",
-        Style::default().fg(pal.dim),
-    )));
+        Some(Media::Image(doc)) => (media::meta_rows(&doc.meta), 0),
 
-    lines.push(Line::from(""));
+        None => return,
+    };
 
-    for chunk in doc.head.chunks(16) {
-        lines.push(Line::from(Span::styled(hex_line(chunk), Style::default().fg(pal.fg))));
+    // Breathing room before the dump starts.
+    if hex_rows > 0 && !meta.is_empty() {
+        meta.push(media::Row::Blank);
+    }
+
+    let total = meta.len() as u64 + hex_rows;
+
+    // Keep the last screenful reachable but never scroll past the end.
+    let max_scroll = total.saturating_sub(height as u64);
+
+    app.media_scroll = app.media_scroll.min(max_scroll);
+
+    let first = app.media_scroll;
+
+    // Pull only the bytes the visible hex rows need.
+    if let Some(Media::Binary(doc)) = app.media.as_mut() {
+        let hex_first = first.saturating_sub(meta.len() as u64);
+
+        doc.ensure_window(hex_first, height + 1);
+    }
+
+    let label = Style::default().fg(pal.dim);
+
+    let value = Style::default().fg(pal.fg);
+
+    let title = Style::default().fg(ACCENT).add_modifier(Modifier::BOLD);
+
+    // Line up the values in a column, but never let a long label crowd them out.
+    let label_w = meta
+        .iter()
+        .filter_map(|r| match r {
+            media::Row::Field(l, _) => Some(l.chars().count()),
+
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        .min(18);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(height);
+
+    for i in 0..height as u64 {
+        let row = first + i;
+
+        if row >= total {
+            break;
+        }
+
+        let line = if let Some(meta_row) = meta.get(row as usize) {
+            match meta_row {
+                media::Row::Title(text) => Line::from(Span::styled(format!("  {text}"), title)),
+
+                media::Row::Field(l, v) => Line::from(vec![
+                    Span::styled(format!("    {l:<label_w$}  "), label),
+                    Span::styled(v.clone(), value),
+                ]),
+
+                media::Row::Blank => Line::from(""),
+            }
+        } else {
+            let hex_row = row - meta.len() as u64;
+
+            match &app.media {
+                Some(Media::Binary(doc)) => {
+                    let bytes = doc.hex_row(hex_row);
+
+                    let (hex, ascii) = media::hex_line(hex_row * media::HEX_COLS as u64, bytes);
+
+                    Line::from(vec![
+                        Span::styled(hex, label),
+                        Span::styled(ascii, value),
+                    ])
+                }
+
+                _ => Line::from(""),
+            }
+        };
+
+        lines.push(line);
     }
 
     frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn hex_line(chunk: &[u8]) -> String {
-    let mut hex = String::new();
-
-    for (i, b) in chunk.iter().enumerate() {
-        if i == 8 {
-            hex.push(' ');
-        }
-
-        hex.push_str(&format!("{b:02x} "));
-    }
-
-    let ascii: String = chunk
-        .iter()
-        .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
-        .collect();
-
-    format!("  {hex:<49}|{ascii}|")
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect, pal: UiPalette) {
@@ -615,8 +671,21 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, pal: UiPalette) {
             ),
         };
 
+        // An image can flip to its metadata; a binary is already showing it.
+        let hint = match m {
+            Media::Image(_) if app.media_info => "  i: picture",
+
+            Media::Image(_) => "  i: info",
+
+            Media::Binary(_) => "",
+        };
+
         (
-            vec![(" [VIEW] ".to_string(), badge), (path, text)],
+            vec![
+                (" [VIEW] ".to_string(), badge),
+                (path, text),
+                (hint.to_string(), dim),
+            ],
             vec![(format!("{info} "), dim)],
         )
     } else {
@@ -1028,6 +1097,143 @@ mod tests {
         assert_eq!(app.gutter_w, 4, "3-digit line numbers plus a space");
 
         let _ = fs::remove_file(path);
+    }
+
+    /// A binary opens straight into the inspector: what the file is, then the
+    /// whole thing in hex.
+    #[test]
+    fn binary_shows_metadata_then_hex() {
+        let dir = std::env::temp_dir().join("ocode_inspect_bin");
+
+        let _ = fs::remove_dir_all(&dir);
+
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("thing.bin");
+
+        // A gzip header, so there is something to report beyond name and size.
+        let mut bytes = vec![0x1f, 0x8b, 0x08, 0x00];
+
+        bytes.extend((0..4000u32).map(|i| (i % 256) as u8));
+
+        fs::write(&path, &bytes).unwrap();
+
+        let mut app = App::new(path, false).unwrap();
+
+        app.picker = None;
+
+        // Wide enough that the status bar keeps its badge: a narrower terminal
+        // legitimately truncates the left side to save the file name.
+        let screen = render_to_string(&mut app, 130, 24);
+
+        assert!(screen.contains("gzip"), "the format is named:\n{screen}");
+
+        assert!(screen.contains("thing.bin"), "the file is named");
+
+        assert!(screen.contains("00000000"), "the hex dump starts at the top of the file");
+
+        assert!(screen.contains("[VIEW]"), "status bar marks the view");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Paging must reach the tail of a file too large to hold on one screen,
+    /// and stop there rather than scrolling into blank space.
+    #[test]
+    fn inspector_scrolls_to_the_end_and_stops() {
+        let dir = std::env::temp_dir().join("ocode_inspect_scroll");
+
+        let _ = fs::remove_dir_all(&dir);
+
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("big.bin");
+
+        let len = 40_000usize;
+
+        fs::write(&path, (0..len).map(|i| (i % 251) as u8).collect::<Vec<u8>>()).unwrap();
+
+        let mut app = App::new(path, false).unwrap();
+
+        app.picker = None;
+
+        let _ = render_to_string(&mut app, 90, 20);
+
+        // End: the last row of the file has to be on screen.
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::End));
+
+        let screen = render_to_string(&mut app, 90, 20);
+
+        let last_offset = format!("{:08x}", (len - 1) / 16 * 16);
+
+        assert!(screen.contains(&last_offset), "the final row {last_offset} is shown:\n{screen}");
+
+        let settled = app.media_scroll;
+
+        // Pressing End again must not run past the end.
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::End));
+
+        let _ = render_to_string(&mut app, 90, 20);
+
+        assert_eq!(app.media_scroll, settled, "already at the end, so nothing moves");
+
+        // Home returns to the first row.
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Home));
+
+        let screen = render_to_string(&mut app, 90, 20);
+
+        assert_eq!(app.media_scroll, 0);
+
+        assert!(screen.contains("00000000"), "back at the start of the file");
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// An image shows the picture; `i` swaps it for what the file says about
+    /// itself, and back.
+    #[test]
+    fn i_toggles_an_image_between_picture_and_metadata() {
+        let dir = std::env::temp_dir().join("ocode_inspect_img");
+
+        let _ = fs::remove_dir_all(&dir);
+
+        fs::create_dir_all(&dir).unwrap();
+
+        let path = dir.join("p.png");
+
+        let mut img = image::RgbaImage::new(9, 4);
+
+        for px in img.pixels_mut() {
+            *px = image::Rgba([10, 20, 30, 255]);
+        }
+
+        image::DynamicImage::ImageRgba8(img).save(&path).unwrap();
+
+        let mut app = App::new(path, false).unwrap();
+
+        app.picker = None;
+
+        let _ = render_to_string(&mut app, 80, 14);
+
+        assert!(app.image_cells.is_some(), "the picture is painted by default");
+
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('i')));
+
+        let screen = render_to_string(&mut app, 80, 14);
+
+        assert!(app.image_cells.is_none(), "the picture gives way to the metadata");
+
+        assert!(screen.contains("9 x 4 px"), "real dimensions are reported:\n{screen}");
+
+        assert!(screen.contains("truecolour"), "the colour type comes from the PNG header");
+
+        app.on_key(crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('i')));
+
+        let _ = render_to_string(&mut app, 80, 14);
+
+        assert!(app.image_cells.is_some(), "and back to the picture");
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     /// An image opened with the sidebar up must still be painted, in the editor

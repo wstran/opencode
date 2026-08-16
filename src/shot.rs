@@ -187,22 +187,24 @@ mod shots {
         }
     }
 
+
     /// Regenerate the README pictures. Step one writes `docs/*.svg`:
     ///
     /// ```sh
     /// cargo test --bin ocode -- --ignored write_readme_screenshots
     /// ```
     ///
-    /// Step two rasterises them, since a PNG is what renders everywhere:
+    /// Step two rasterises them, since a PNG is what renders everywhere.
+    /// Quick Look does the render and pads to a square, so it is cropped back:
     ///
     /// ```sh
-    /// cd docs && for n in welcome editor find; do
+    /// cd docs && mkdir -p /tmp/ql && for n in welcome editor find inspect; do
     ///   W=$(sed -n 's/.*width="\([0-9]*\)".*/\1/p' $n.svg | head -1)
     ///   H=$(sed -n 's/.*height="\([0-9]*\)".*/\1/p' $n.svg | head -1)
-    ///   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-    ///     --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=2 \
-    ///     --screenshot=$n.png --window-size=$W,$H "file://$PWD/$n.svg"
-    /// done && rm -f *.svg
+    ///   qlmanage -t -s $((W*2)) -o /tmp/ql "$n.svg" >/dev/null 2>&1
+    ///   python3 -c "from PIL import Image; \
+    ///     Image.open('/tmp/ql/$n.svg.png').crop((0,0,$W*2,$H*2)).save('$n.png')"
+    /// done && rm -f *.svg && rm -rf /tmp/ql
     /// ```
     ///
     /// Ignored by default because it writes into `docs/`, which a plain test
@@ -270,6 +272,58 @@ mod shots {
         app.scroll_free = true;
 
         shot(&mut app, 108, 24, "find.svg");
+
+        // The inspector: what a file says about itself, then its bytes. Built
+        // here rather than pointing at a file that exists on one machine, so
+        // the picture is reproducible.
+        let mp3 = stage.join("song.mp3");
+
+        let mut bytes = Vec::new();
+
+        let frames: Vec<(&[u8; 4], &str)> = vec![
+            (b"TIT2", "Blue Monday"),
+            (b"TPE1", "New Order"),
+            (b"TALB", "Power, Corruption & Lies"),
+            (b"TYER", "1983"),
+            (b"TCON", "Synth-pop"),
+        ];
+
+        let mut body = Vec::new();
+
+        for (id, value) in &frames {
+            body.extend_from_slice(*id);
+
+            // Frame size counts the encoding byte with the text.
+            body.extend_from_slice(&((value.len() + 1) as u32).to_be_bytes());
+
+            body.extend_from_slice(&[0, 0, 0]);
+
+            body.extend_from_slice(value.as_bytes());
+        }
+
+        bytes.extend_from_slice(b"ID3\x04\x00\x00");
+
+        // The tag size is synchsafe: seven bits per byte.
+        let size = body.len() as u32;
+
+        bytes.extend_from_slice(&[
+            ((size >> 21) & 0x7f) as u8,
+            ((size >> 14) & 0x7f) as u8,
+            ((size >> 7) & 0x7f) as u8,
+            (size & 0x7f) as u8,
+        ]);
+
+        bytes.extend_from_slice(&body);
+
+        bytes.extend((0..2048u32).map(|i| (i.wrapping_mul(37) % 251) as u8));
+
+        std::fs::write(&mp3, &bytes).unwrap();
+
+        let mut app = App::new(std::path::PathBuf::from("song.mp3"), false).unwrap();
+
+        app.picker = None;
+
+        shot(&mut app, 108, 22, "inspect.svg");
 
         std::env::set_current_dir(previous).unwrap();
 

@@ -55,9 +55,9 @@ ocode --style       # change the colour scheme
   touched a key.
 - **Watches the file.** A clean buffer auto-reloads when something else writes
   the file; with unsaved edits it warns instead of overwriting.
-- **Images and binaries.** PNG/JPEG/GIF/BMP/WebP render inline in terminals that
-  speak the kitty graphics protocol. Anything else shows a labelled hex preview
-  instead of an error.
+- **Images, binaries and metadata.** PNG/JPEG/GIF/BMP/WebP render inline in
+  terminals that speak the kitty graphics protocol. Anything else opens as its
+  metadata plus the whole file in hex, never an error.
 - **15 themes, 119 languages** out of the box, and it only ever recolours your
   code, never the background.
 
@@ -114,6 +114,7 @@ afterwards so you can press again, and undo in one step.
 | Drag | Select |
 | `Shift`+click | Extend the selection from the caret to the click |
 | Wheel | Scroll the view, leaving the caret and any selection alone |
+| Wheel in a binary or metadata view | Scroll the inspector |
 | Click a file in the tree | First click selects it, a second click opens it |
 | Click a folder in the tree | Expand or collapse, on the first click |
 
@@ -175,13 +176,47 @@ interface, not just the code.
 
 Add any `.sublime-syntax` grammar in `~/.config/ocode/syntaxes/`.
 
-## Images and other files
+## Images, binaries and metadata
 
 Open a PNG, JPEG, GIF, BMP or WebP and it is drawn inline, scaled to fit and
 centred, through the kitty graphics protocol (Ghostty, Kitty). It stays visible
-next to the file tree, so you can click through a folder of images. Any other
-binary (PDF, archives, fonts) shows a labelled hex preview of its first bytes
-rather than failing to open.
+next to the file tree, so you can click through a folder of images.
+
+<p align="center">
+  <img src="docs/inspect.png" alt="the inspector: an MP3's tags above its bytes" width="900">
+</p>
+
+Press **`i`** on an image to see what the file says about itself instead of the
+picture. Any other binary opens straight into that view: what the format is,
+then the **whole file in hex**, scrolled with `↑`/`↓`, `PageUp`/`PageDown`,
+`Home`/`End` and the wheel. Only the visible rows are read, so a multi-gigabyte
+file opens as fast as a small one.
+
+What gets read, all parsed in-tree with no extra dependency:
+
+| Format | Reported |
+|--------|----------|
+| PNG | dimensions, bit depth, colour type, interlace, DPI, gamma, ICC, APNG frames, text chunks |
+| JPEG | dimensions, precision, components, encoding, density, comment, and **EXIF**: camera, lens, shutter, aperture, ISO, focal length, orientation, dates, **GPS** |
+| GIF / BMP / WebP | version, dimensions, colour table, looping, encoding, alpha |
+| MP4 / MOV | duration, dimensions, codecs, creation time, brand |
+| PDF | version, title, author, producer, creator, whether it is encrypted |
+| ZIP / gzip | entries, directory size, comment, original name, timestamp |
+| ELF / Mach-O | class, byte order, type, architecture |
+| WebAssembly | version, sections present |
+| MP3 / FLAC | ID3 title, artist, album, year; sample rate, channels, duration |
+| TrueType / OpenType | family, style, version, table count |
+| SQLite | page size, page count, writer version |
+
+That EXIF block is the reason this exists: photos routinely carry the
+coordinates where they were taken and the serial number of the camera, and this
+is a quick way to see what a file is about to tell everyone you send it to.
+
+Reading never writes, so nothing here can strip a file's metadata the way some
+viewers do when they re-save. Every parser walks untrusted bytes with checked
+reads and bounded loops: a truncated or deliberately malformed file shows fewer
+fields, and there is a test that walks every reader over damaged input to keep
+it that way.
 
 ## Changes on disk
 
