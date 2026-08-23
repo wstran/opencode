@@ -30,6 +30,15 @@ contexts:
       scope: keyword.control.swift
     - match: '\b(Int|UInt|Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64|Float|Double|String|Bool|Character|Optional|Array|Dictionary|Set|Void|Any|AnyObject)\b'
       scope: storage.type.swift
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.swift
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.swift
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.swift entity.name.type.swift support.class.swift
   block_comment:
     - match: '\*/'
       scope: punctuation.definition.comment.swift

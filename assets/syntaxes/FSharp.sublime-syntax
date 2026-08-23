@@ -34,6 +34,15 @@ contexts:
       scope: keyword.control.fsharp
     - match: '\b(int|int8|int16|int32|int64|uint|uint8|uint16|uint32|uint64|float|float32|double|decimal|bool|string|char|byte|sbyte|unit|obj|Option|Result|List|Map|Set|Array|seq|Seq|IEnumerable)\b'
       scope: storage.type.fsharp
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.fsharp
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.fsharp
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.fsharp entity.name.type.fsharp support.class.fsharp
   block_comment:
     - match: '\*\)'
       scope: punctuation.definition.comment.fsharp

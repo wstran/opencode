@@ -25,6 +25,15 @@ contexts:
       scope: keyword.control.yul
     - match: '\b(stop|add|mul|sub|div|sdiv|mod|smod|exp|not|lt|gt|slt|sgt|eq|iszero|and|or|xor|byte|shl|shr|sar|addmod|mulmod|keccak256|sha3|address|balance|origin|caller|callvalue|calldataload|calldatasize|calldatacopy|codesize|codecopy|gasprice|extcodesize|extcodecopy|returndatasize|returndatacopy|blockhash|coinbase|timestamp|number|difficulty|prevrandao|gaslimit|chainid|selfbalance|basefee|pop|mload|mstore|mstore8|sload|sstore|tload|tstore|mcopy|jump|jumpi|pc|msize|gas|create|create2|call|callcode|delegatecall|staticcall|return|revert|invalid|selfdestruct|log0|log1|log2|log3|log4|datasize|dataoffset|datacopy|setimmutable|loadimmutable|linkersymbol|memoryguard|verbatim)\b'
       scope: support.function.builtin.yul
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.yul
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.yul
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.yul entity.name.type.yul support.class.yul
   block_comment:
     - match: '\*/'
       scope: punctuation.definition.comment.yul

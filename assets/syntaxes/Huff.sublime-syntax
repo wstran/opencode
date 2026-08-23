@@ -23,6 +23,15 @@ contexts:
       scope: keyword.control.huff
     - match: '\b(push\d*|dup\d+|swap\d+|add|mul|sub|div|sdiv|mod|exp|lt|gt|eq|iszero|and|or|xor|not|shl|shr|sar|byte|keccak256|sha3|mload|mstore|mstore8|sload|sstore|calldataload|calldatasize|calldatacopy|codecopy|returndatasize|returndatacopy|pop|jump|jumpi|jumpdest|pc|msize|gas|caller|callvalue|address|balance|origin|timestamp|number|chainid|call|staticcall|delegatecall|create|create2|return|revert|stop|selfdestruct|log0|log1|log2|log3|log4)\b'
       scope: support.function.builtin.huff
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.huff
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.huff
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.huff entity.name.type.huff support.class.huff
   block_comment:
     - match: '\*/'
       scope: punctuation.definition.comment.huff

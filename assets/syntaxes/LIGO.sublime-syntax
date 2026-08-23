@@ -29,6 +29,15 @@ contexts:
       scope: keyword.control.ligo
     - match: '\b(int|nat|tez|mutez|address|bytes|string|list|map|set|option|bool|unit|operation|chain_id|signature|key|key_hash|timestamp|big_map|sapling_state|sapling_transaction)\b'
       scope: storage.type.ligo
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.ligo
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.ligo
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.ligo entity.name.type.ligo support.class.ligo
   block_comment:
     - match: '\*/'
       scope: punctuation.definition.comment.ligo

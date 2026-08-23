@@ -30,6 +30,15 @@ contexts:
       scope: keyword.control.dart
     - match: '\b(int|double|num|bool|String|List|Map|Set|Iterable|Future|Stream|Object|Symbol|Type|Record)\b'
       scope: storage.type.dart
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.dart
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.dart
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.dart entity.name.type.dart support.class.dart
   block_comment:
     - match: '\*/'
       scope: punctuation.definition.comment.dart

@@ -174,6 +174,11 @@ interface, not just the code.
 - **Web supersets**, mapped to their base grammar: `.vue/.svelte/.astro` as
   HTML, `.scss/.sass/.less` as CSS, `.mdx` as Markdown.
 
+Fenced code blocks in Markdown are highlighted as the language they name, so
+a ```` ```rust ```` block in a README reads as Rust. syntect's own Markdown
+grammar leaves those blocks plain, so ocode switches grammars at the fence
+itself.
+
 Add any `.sublime-syntax` grammar in `~/.config/ocode/syntaxes/`.
 
 ## Images, binaries and metadata

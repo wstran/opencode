@@ -29,6 +29,15 @@ contexts:
       scope: keyword.control.cairo
     - match: '\b(felt252|bool|usize|u8|u16|u32|u64|u128|u256|i8|i16|i32|i64|i128|ByteArray|Array|Span|ContractAddress|ClassHash|Option|Result)\b'
       scope: storage.type.cairo
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.cairo
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.cairo
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.cairo entity.name.type.cairo support.class.cairo
   block_comment:
     - match: '\*/'
       scope: punctuation.definition.comment.cairo

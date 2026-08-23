@@ -22,6 +22,15 @@ contexts:
       push: single_quoted
     - match: '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?'
       scope: variable.other.dockerfile
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.dockerfile
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.dockerfile
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.dockerfile entity.name.type.dockerfile support.class.dockerfile
   double_quoted:
     - match: '"'
       scope: punctuation.definition.string.end.dockerfile

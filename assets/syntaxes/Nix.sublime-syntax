@@ -25,6 +25,15 @@ contexts:
       scope: constant.language.nix
     - match: '\b(let|in|with|rec|inherit|if|then|else|import|builtins|assert|or)\b'
       scope: keyword.control.nix
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.nix
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.nix
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.nix entity.name.type.nix support.class.nix
   block_comment:
     - match: '\*/'
       scope: punctuation.definition.comment.nix

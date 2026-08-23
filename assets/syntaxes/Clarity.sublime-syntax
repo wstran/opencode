@@ -23,6 +23,15 @@ contexts:
       scope: keyword.control.clarity
     - match: '\b(int|uint|bool|principal|buff|string-ascii|string-utf8|list|tuple|optional|response)\b'
       scope: storage.type.clarity
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.clarity
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.clarity
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.clarity entity.name.type.clarity support.class.clarity
   double_string:
     - match: '"'
       scope: punctuation.definition.string.end.clarity

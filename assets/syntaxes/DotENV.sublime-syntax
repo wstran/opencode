@@ -15,6 +15,15 @@ contexts:
         2: variable.other.env
         3: keyword.operator.assignment.env
       push: value
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.env
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.env
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.env entity.name.type.env support.class.env
   value:
     - match: '"'
       scope: punctuation.definition.string.begin.env

@@ -32,6 +32,15 @@ contexts:
       scope: storage.modifier.solidity
     - match: '\b(address|bool|string|byte|bytes\d*|u?int\d*|u?fixed\d*|mapping)\b'
       scope: storage.type.solidity
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.solidity
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.solidity
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.solidity entity.name.type.solidity support.class.solidity
   block_comment:
     - match: '\*/'
       scope: punctuation.definition.comment.solidity

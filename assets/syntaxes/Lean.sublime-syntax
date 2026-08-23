@@ -24,6 +24,15 @@ contexts:
       scope: keyword.control.lean
     - match: '\b(Nat|Int|Bool|String|Char|Float|Prop|Type|Sort|List|Array|Option|Unit|Fin)\b'
       scope: storage.type.lean
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.lean
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.lean
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.lean entity.name.type.lean support.class.lean
   block_comment:
     - match: '-/'
       scope: punctuation.definition.comment.lean

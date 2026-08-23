@@ -7,7 +7,7 @@ use syntect::highlighting::{
     Color as SynColor, FontStyle, HighlightIterator, HighlightState, Highlighter, Style as SynStyle,
     Theme, ThemeSet,
 };
-use syntect::parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxSet};
+use syntect::parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 const DEFAULT_THEME: &str = "base16-ocean.dark";
@@ -308,13 +308,17 @@ impl SyntaxHighlighter {
 
         let highlighter = Highlighter::new(&self.themes[self.current].1);
 
-        if cache.states.is_empty() {
-            let initial = (
-                ParseState::new(syntax),
-                HighlightState::new(&highlighter, ScopeStack::new()),
-            );
+        // Only Markdown carries fenced blocks worth switching grammars for.
+        let fenced = cache.syntax_name.starts_with("Markdown");
 
-            cache.states.push(initial);
+        if cache.states.is_empty() {
+            cache.states.push(LineState {
+                outer: (
+                    ParseState::new(syntax),
+                    HighlightState::new(&highlighter, ScopeStack::new()),
+                ),
+                inner: None,
+            });
         }
 
         let total = rope.len_lines();
@@ -322,39 +326,146 @@ impl SyntaxHighlighter {
         while cache.lines.len() <= target_line && cache.lines.len() < total {
             let i = cache.lines.len();
 
-            let (mut parse, mut hl) = cache.states[i].clone();
+            let mut state = cache.states[i].clone();
 
             let raw = rope.line(i).to_string();
 
-            let spans = match parse.parse_line(&raw, &self.syntax_set) {
-                Ok(ops) => HighlightIterator::new(&mut hl, &ops, &raw, &highlighter)
-                    .filter_map(|(syn, text)| convert_span(syn, text))
-                    .collect(),
+            // A fence line belongs to the document, not to the code inside it,
+            // so it is always parsed by the outer grammar.
+            let closing = state.inner.is_some() && is_fence(&raw).is_some();
 
-                Err(_) => {
-                    let trimmed = raw.trim_end_matches(['\n', '\r']);
+            let spans = if let (Some(inner), false) = (state.inner.as_mut(), closing) {
+                let (parse, hl) = inner;
 
-                    if trimmed.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![(Style::default(), trimmed.to_string())]
+                highlight_line(parse, hl, &raw, &self.syntax_set, &highlighter)
+            } else {
+                let (parse, hl) = &mut state.outer;
+
+                highlight_line(parse, hl, &raw, &self.syntax_set, &highlighter)
+            };
+
+            if closing {
+                state.inner = None;
+            } else if fenced && state.inner.is_none() {
+                // Opening a fence with a language tag switches grammars for the
+                // lines that follow, until the matching close.
+                if let Some(lang) = is_fence(&raw).flatten() {
+                    if let Some(embedded) = self.syntax_for_tag(&lang) {
+                        state.inner = Some((
+                            ParseState::new(embedded),
+                            HighlightState::new(&highlighter, ScopeStack::new()),
+                        ));
                     }
                 }
-            };
+            }
 
             cache.lines.push(spans);
 
-            cache.states.push((parse, hl));
+            cache.states.push(state);
+        }
+    }
+
+    /// Resolve an info string like `rust`, `ts` or `sol` to a grammar. Falls
+    /// back through the same aliases the file-extension lookup uses, so a fence
+    /// tagged `jsx` lands on the JSX grammar just as a `.jsx` file does.
+    fn syntax_for_tag(&self, tag: &str) -> Option<&SyntaxReference> {
+        let tag = tag.trim().to_lowercase();
+
+        if tag.is_empty() {
+            return None;
+        }
+
+        // Tags people write that are not the grammar's own name or extension.
+        let tag = match tag.as_str() {
+            "sh" | "shell" | "console" | "bash" => "bash",
+
+            "yml" => "yaml",
+
+            "rs" => "rs",
+
+            "py" => "py",
+
+            "golang" => "go",
+
+            "c++" | "cpp" | "cxx" => "cpp",
+
+            "objective-c" => "m",
+
+            "dockerfile" => "Dockerfile",
+
+            "make" | "makefile" => "make",
+
+            other => other,
+        };
+
+        alias_extension(tag)
+            .and_then(|base| self.syntax_set.find_syntax_by_extension(base))
+            .or_else(|| self.syntax_set.find_syntax_by_extension(tag))
+            .or_else(|| self.syntax_set.find_syntax_by_token(tag))
+    }
+}
+
+/// Parse one line, falling back to unstyled text when the grammar errors.
+fn highlight_line(
+    parse: &mut ParseState,
+    hl: &mut HighlightState,
+    raw: &str,
+    syntax_set: &SyntaxSet,
+    highlighter: &Highlighter,
+) -> Vec<(Style, String)> {
+    match parse.parse_line(raw, syntax_set) {
+        Ok(ops) => HighlightIterator::new(hl, &ops, raw, highlighter)
+            .filter_map(|(syn, text)| convert_span(syn, text))
+            .collect(),
+
+        Err(_) => {
+            let trimmed = raw.trim_end_matches(['\n', '\r']);
+
+            if trimmed.is_empty() {
+                Vec::new()
+            } else {
+                vec![(Style::default(), trimmed.to_string())]
+            }
         }
     }
 }
 
+/// Whether a line is a code fence, and the info string when it opens one.
+/// `Some(None)` is a bare fence, `Some(Some(tag))` names a language.
+fn is_fence(raw: &str) -> Option<Option<String>> {
+    let line = raw.trim_end_matches(['\n', '\r']);
+
+    // Up to three spaces of indent is still a fence, per CommonMark.
+    let body = line.strip_prefix("   ").or_else(|| line.strip_prefix("  ")).or_else(|| line.strip_prefix(" ")).unwrap_or(line);
+
+    let rest = body.strip_prefix("```").or_else(|| body.strip_prefix("~~~"))?;
+
+    // The info string stops at the first space: ```rust,no_run is still Rust.
+    let tag: String = rest
+        .trim_start_matches(['`', '~'])
+        .trim()
+        .chars()
+        .take_while(|c| !c.is_whitespace() && *c != ',' && *c != '{')
+        .collect();
+
+    Some((!tag.is_empty()).then_some(tag))
+}
+
 /// Per-buffer highlight cache. `states[i]` is the parser/highlighter state
 /// *before* line `i`; `lines[i]` holds the styled spans of line `i`.
+/// Parser and highlighter position before a line. `inner` is set while the
+/// line sits inside a fenced code block, and holds that language's own state.
+#[derive(Clone)]
+pub struct LineState {
+    outer: (ParseState, HighlightState),
+
+    inner: Option<(ParseState, HighlightState)>,
+}
+
 pub struct HlCache {
     syntax_name: String,
 
-    states: Vec<(ParseState, HighlightState)>,
+    states: Vec<LineState>,
 
     lines: Vec<Vec<(Style, String)>>,
 }
@@ -445,6 +556,116 @@ mod tests {
                     assert!(lum >= 0.59, "dark-theme fg too dim: {:?} (lum {lum:.2})", p.fg);
                 }
             }
+        }
+    }
+
+
+
+
+    /// A fenced block in Markdown is code, and should read as the language it
+    /// says it is. syntect's Markdown grammar leaves it plain, so ocode drives
+    /// the switch itself.
+    #[test]
+    fn markdown_highlights_fenced_code_by_language() {
+        use ropey::Rope;
+
+        let h = SyntaxHighlighter::new();
+
+        let md = "# Title\n\n```rust\nfn main() { let x: u32 = 42; }\n```\n\nplain text\n";
+
+        let rope = Rope::from_str(md);
+
+        let mut cache = HlCache::new("Markdown".to_string());
+
+        h.ensure(&mut cache, &rope, 10);
+
+        let colours = |line: usize| -> usize {
+            cache
+                .line(line)
+                .map(|spans| {
+                    spans
+                        .iter()
+                        .filter(|(_, t)| !t.trim().is_empty())
+                        .map(|(s, _)| format!("{:?}", s.fg))
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                })
+                .unwrap_or(0)
+        };
+
+        assert!(colours(3) > 2, "the Rust line inside the fence is highlighted, not plain");
+
+        assert_eq!(colours(6), 1, "prose after the fence is back to one colour");
+    }
+
+    /// Closing a fence has to end the switch, or the rest of the document keeps
+    /// being parsed as the embedded language.
+    #[test]
+    fn markdown_leaves_the_fence_behind() {
+        use ropey::Rope;
+
+        let h = SyntaxHighlighter::new();
+
+        // `fn` and `let` are Rust keywords; in prose they must not be coloured.
+        let md = "```rust\nlet x = 1;\n```\n\nfn and let are ordinary words here.\n";
+
+        let rope = Rope::from_str(md);
+
+        let mut cache = HlCache::new("Markdown".to_string());
+
+        h.ensure(&mut cache, &rope, 8);
+
+        let prose = cache.line(4).expect("the prose line is highlighted");
+
+        let colours: std::collections::BTreeSet<_> =
+            prose.iter().filter(|(_, t)| !t.trim().is_empty()).map(|(s, _)| format!("{:?}", s.fg)).collect();
+
+        assert_eq!(colours.len(), 1, "prose after a closed fence is one colour: {colours:?}");
+    }
+
+    /// Scopes are only worth adding if the themes actually paint them. Dracula
+    /// and Sublime Snazzy define no `entity.name.type`, so a type tagged with
+    /// it came out the same colour as ordinary text and the scope bought
+    /// nothing. Asserts the roles are distinguishable rather than counting
+    /// colours: minimal themes legitimately give two roles one colour.
+    #[test]
+    fn every_theme_tells_types_and_calls_from_plain_text() {
+        use ropey::Rope;
+
+        let mut h = SyntaxHighlighter::new();
+
+        let code = "contract Vault {\n    function deposit(uint256 amount) external {}\n}\n";
+
+        let rope = Rope::from_str(code);
+
+        for idx in 0..h.theme_count() {
+            let name = h.theme_names()[idx].to_string();
+
+            h.set_theme(idx);
+
+            let mut cache = HlCache::new("Solidity".to_string());
+
+            h.ensure(&mut cache, &rope, 5);
+
+            let colour_of = |needle: &str| -> Option<String> {
+                (0..3).find_map(|l| {
+                    cache.line(l)?.iter().find(|(_, t)| t.trim() == needle).map(|(s, _)| format!("{:?}", s.fg))
+                })
+            };
+
+            let plain = colour_of("{").expect("punctuation is rendered");
+
+            for (token, role) in [("Vault", "a type name"), ("deposit", "a call")] {
+                let got = colour_of(token).unwrap_or_else(|| panic!("{name}: {token} is not rendered"));
+
+                assert_ne!(got, plain, "{name} paints {role} the same as plain text");
+            }
+
+            // Not asserted: that a type differs from a keyword. Solarized and
+            // the base16 family are sixteen-colour palettes and deliberately
+            // share a slot between some roles. The property worth holding is
+            // that these tokens are not invisible, which is the bug that
+            // picking a scope no theme defines actually caused.
         }
     }
 

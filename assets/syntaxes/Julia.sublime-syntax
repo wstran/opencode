@@ -31,6 +31,15 @@ contexts:
       scope: keyword.control.julia
     - match: '\b(Int|Int8|Int16|Int32|Int64|Int128|UInt|UInt8|UInt16|UInt32|UInt64|UInt128|Float16|Float32|Float64|Bool|String|Char|Symbol|Array|Vector|Matrix|Dict|Set|Tuple|NamedTuple|Number|Real|Complex|Function|Any|Nothing|Missing)\b'
       scope: storage.type.julia
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.julia
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.julia
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.julia entity.name.type.julia support.class.julia
   block_comment:
     - match: '=#'
       scope: punctuation.definition.comment.julia

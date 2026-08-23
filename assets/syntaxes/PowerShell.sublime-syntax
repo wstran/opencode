@@ -39,6 +39,15 @@ contexts:
       scope: keyword.control.powershell
     - match: '\B-[A-Za-z][A-Za-z0-9]*'
       scope: variable.parameter.flag.powershell
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.powershell
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.powershell
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.powershell entity.name.type.powershell support.class.powershell
   block_comment:
     - match: '#>'
       scope: punctuation.definition.comment.powershell

@@ -27,6 +27,15 @@ contexts:
       scope: keyword.control.hcl
     - match: '\b(string|number|bool|list|map|set|object|tuple|any)\b'
       scope: storage.type.hcl
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.hcl
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.hcl
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.hcl entity.name.type.hcl support.class.hcl
   block_comment:
     - match: '\*/'
       scope: punctuation.definition.comment.hcl

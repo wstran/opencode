@@ -34,6 +34,15 @@ contexts:
       scope: keyword.control.kotlin
     - match: '\b(Int|Long|Short|Byte|Float|Double|Boolean|Char|String|Unit|Nothing|Any|Array|List|Set|Map|MutableList|MutableMap|MutableSet|Pair|Triple|Sequence|Iterable)\b'
       scope: storage.type.kotlin
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.kotlin
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.kotlin
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.kotlin entity.name.type.kotlin support.class.kotlin
   block_comment:
     - match: '\*/'
       scope: punctuation.definition.comment.kotlin

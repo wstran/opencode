@@ -27,6 +27,15 @@ contexts:
       scope: keyword.control.verilog
     - match: '\b(reg|wire|logic|bit|byte|int|integer|real|shortint|longint|chandle|string|tri|wand|wor|tri0|tri1|triand|trior|trireg|supply0|supply1)\b'
       scope: storage.type.verilog
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.verilog
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.verilog
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.verilog entity.name.type.verilog support.class.verilog
   block_comment:
     - match: '\*/'
       scope: punctuation.definition.comment.verilog

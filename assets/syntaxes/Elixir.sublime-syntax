@@ -33,6 +33,15 @@ contexts:
       scope: constant.language.elixir
     - match: '\b(def|defp|defmodule|defprotocol|defimpl|defmacro|defmacrop|defstruct|defexception|defguard|defguardp|defdelegate|do|end|if|else|unless|case|cond|when|fn|alias|import|require|use|try|rescue|catch|after|raise|throw|with|for|receive|quote|unquote|and|or|not|in)\b'
       scope: keyword.control.elixir
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.elixir
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.elixir
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.elixir entity.name.type.elixir support.class.elixir
   block_string:
     - match: '"""'
       scope: punctuation.definition.string.end.elixir

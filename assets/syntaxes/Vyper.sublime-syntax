@@ -29,6 +29,15 @@ contexts:
       scope: keyword.control.vyper
     - match: '\b(address|bool|string|decimal|bytes\d*|String|Bytes|DynArray|HashMap|u?int\d*)\b'
       scope: storage.type.vyper
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.vyper
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.vyper
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.vyper entity.name.type.vyper support.class.vyper
   docstring:
     - match: '"""'
       scope: punctuation.definition.string.end.vyper

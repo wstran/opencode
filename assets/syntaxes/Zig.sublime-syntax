@@ -25,6 +25,15 @@ contexts:
       scope: keyword.control.zig
     - match: '\b(u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f16|f32|f64|f128|bool|void|noreturn|type|anyerror|anyopaque|c_int|c_uint|c_long|c_ulong|c_void|c_char|c_short)\b'
       scope: storage.type.zig
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.zig
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.zig
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.zig entity.name.type.zig support.class.zig
   double_string:
     - match: '"'
       scope: punctuation.definition.string.end.zig

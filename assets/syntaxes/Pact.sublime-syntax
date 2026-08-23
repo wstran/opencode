@@ -25,6 +25,15 @@ contexts:
       scope: keyword.control.pact
     - match: '\b(integer|decimal|string|bool|list|table|object|guard|time|keyset|module)\b'
       scope: storage.type.pact
+    # Three scopes carry most of the signal in a glance: what is called,
+    # what is a fixed value, and what is a type. Ordered so a call wins
+    # over the shape of its name.
+    - match: '\b[A-Za-z_][A-Za-z0-9_]*(?=\s*\()'
+      scope: entity.name.function.pact
+    - match: '\b[A-Z][A-Z0-9_]{2,}\b'
+      scope: constant.other.pact
+    - match: '\b[A-Z][A-Za-z0-9_]*\b'
+      scope: entity.name.class.pact entity.name.type.pact support.class.pact
   double_string:
     - match: '"'
       scope: punctuation.definition.string.end.pact
