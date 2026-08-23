@@ -179,6 +179,14 @@ a ```` ```rust ```` block in a README reads as Rust. syntect's own Markdown
 grammar leaves those blocks plain, so ocode switches grammars at the fence
 itself.
 
+Grammars disagree about what they bother to tag, and all of them stop
+somewhere: syntect's Rust never marks a type name, its C++ never marks a
+constant. Anything a grammar leaves as ordinary text is looked at once more and
+given a role by its shape, so a call, a constant and a type read differently in
+every language rather than only the ones whose grammar happens to say so. A
+token the grammar did colour is never touched, and prose grammars are left
+alone, so notes in a `.txt` are not painted like code.
+
 Add any `.sublime-syntax` grammar in `~/.config/ocode/syntaxes/`.
 
 ## Images, binaries and metadata

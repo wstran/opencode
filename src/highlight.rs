@@ -7,7 +7,7 @@ use syntect::highlighting::{
     Color as SynColor, FontStyle, HighlightIterator, HighlightState, Highlighter, Style as SynStyle,
     Theme, ThemeSet,
 };
-use syntect::parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxReference, SyntaxSet};
+use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxDefinition, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 const DEFAULT_THEME: &str = "base16-ocean.dark";
@@ -308,6 +308,14 @@ impl SyntaxHighlighter {
 
         let highlighter = Highlighter::new(&self.themes[self.current].1);
 
+        let roles = Roles::for_theme(&highlighter);
+
+        // TextMate splits grammars into `source.*` for code and `text.*` for
+        // prose. Guessing roles from the shape of a word is right for the first
+        // and wrong for the second, where it would colour ordinary capitalised
+        // words and anything followed by a bracket.
+        let outer_is_code = is_code(syntax);
+
         // Only Markdown carries fenced blocks worth switching grammars for.
         let fenced = cache.syntax_name.starts_with("Markdown");
 
@@ -337,11 +345,15 @@ impl SyntaxHighlighter {
             let spans = if let (Some(inner), false) = (state.inner.as_mut(), closing) {
                 let (parse, hl) = inner;
 
-                highlight_line(parse, hl, &raw, &self.syntax_set, &highlighter)
+                // Inside a fence the grammar is the code language, so the pass
+                // applies there even though the document itself is prose.
+                highlight_line(parse, hl, &raw, &self.syntax_set, &highlighter, Some(&roles))
             } else {
                 let (parse, hl) = &mut state.outer;
 
-                highlight_line(parse, hl, &raw, &self.syntax_set, &highlighter)
+                let roles = outer_is_code.then_some(&roles);
+
+                highlight_line(parse, hl, &raw, &self.syntax_set, &highlighter, roles)
             };
 
             if closing {
@@ -412,11 +424,20 @@ fn highlight_line(
     raw: &str,
     syntax_set: &SyntaxSet,
     highlighter: &Highlighter,
+    roles: Option<&Roles>,
 ) -> Vec<(Style, String)> {
     match parse.parse_line(raw, syntax_set) {
-        Ok(ops) => HighlightIterator::new(hl, &ops, raw, highlighter)
-            .filter_map(|(syn, text)| convert_span(syn, text))
-            .collect(),
+        Ok(ops) => {
+            let spans = HighlightIterator::new(hl, &ops, raw, highlighter)
+                .filter_map(|(syn, text)| convert_span(syn, text))
+                .collect();
+
+            match roles {
+                Some(roles) => enrich(spans, roles),
+
+                None => spans,
+            }
+        }
 
         Err(_) => {
             let trimmed = raw.trim_end_matches(['\n', '\r']);
@@ -428,6 +449,11 @@ fn highlight_line(
             }
         }
     }
+}
+
+/// Whether a grammar describes code rather than prose.
+fn is_code(syntax: &SyntaxReference) -> bool {
+    syntax.scope.build_string().starts_with("source.")
 }
 
 /// Whether a line is a code fence, and the info string when it opens one.
@@ -500,12 +526,167 @@ impl HlCache {
     }
 }
 
+
+/// Colours the grammars leave on the table.
+///
+/// Even a good grammar tags only what it models, and they disagree about what
+/// that is: syntect's Rust never marks a type name, its C++ never marks a
+/// constant. Rather than fork seventy-five grammars, anything a grammar left at
+/// the plain foreground is examined once more here, by shape alone, and given
+/// one of three roles. A token the grammar did colour is never touched, so this
+/// can only add information, never contradict the grammar.
+#[derive(Clone, Copy)]
+struct Roles {
+    plain: Color,
+
+    function: Style,
+
+    constant: Style,
+
+    class: Style,
+}
+
+impl Roles {
+    fn for_theme(highlighter: &Highlighter) -> Self {
+        let style_of = |name: &str| {
+            let scope = Scope::new(name).unwrap_or_else(|_| Scope::new("source").unwrap());
+
+            convert_style(highlighter.style_for_stack(&[scope]))
+        };
+
+        let plain = style_of("source").fg.unwrap_or(Color::Reset);
+
+        Self {
+            plain,
+            function: style_of("entity.name.function"),
+            constant: style_of("constant.other"),
+            class: style_of("entity.name.class"),
+        }
+    }
+
+    /// The role a bare identifier plays, judged by its shape and what follows.
+    fn role(&self, word: &str, next: Option<char>) -> Option<Style> {
+        let mut chars = word.chars();
+
+        let first = chars.next()?;
+
+        if !first.is_alphabetic() && first != '_' {
+            return None;
+        }
+
+        if next == Some('(') {
+            return Some(self.function);
+        }
+
+        let letters: Vec<char> = word.chars().filter(|c| c.is_alphabetic()).collect();
+
+        if letters.len() >= 3 && letters.iter().all(|c| c.is_uppercase()) {
+            return Some(self.constant);
+        }
+
+        first.is_uppercase().then_some(self.class)
+    }
+}
+
+/// Split the plain runs of a highlighted line into the roles above. Spans the
+/// grammar already coloured pass through untouched.
+fn enrich(spans: Vec<(Style, String)>, roles: &Roles) -> Vec<(Style, String)> {
+    // Nothing to add when the theme gives these roles the plain colour anyway.
+    if roles.function.fg == Some(roles.plain)
+        && roles.constant.fg == Some(roles.plain)
+        && roles.class.fg == Some(roles.plain)
+    {
+        return spans;
+    }
+
+    // The bracket that makes a name a call often lands in the next span, so
+    // each span needs the first character that follows it. One reverse pass.
+    let mut next_char: Vec<Option<char>> = vec![None; spans.len()];
+
+    let mut after: Option<char> = None;
+
+    for i in (0..spans.len()).rev() {
+        next_char[i] = after;
+
+        if let Some(c) = spans[i].1.chars().find(|c| !c.is_whitespace()) {
+            after = Some(c);
+        }
+    }
+
+    let mut out: Vec<(Style, String)> = Vec::with_capacity(spans.len());
+
+    for (idx, (style, text)) in spans.into_iter().enumerate() {
+        if style.fg != Some(roles.plain) {
+            out.push((style, text));
+
+            continue;
+        }
+
+        let chars: Vec<char> = text.chars().collect();
+
+        let mut run = String::new();
+
+        let mut i = 0;
+
+        while i < chars.len() {
+            let c = chars[i];
+
+            if c.is_alphanumeric() || c == '_' {
+                let start = i;
+
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+
+                let word: String = chars[start..i].iter().collect();
+
+                // A call is written `name(` or `name (`; when the word ends the
+                // span, the bracket is whatever starts the next one.
+                let next = chars[i..]
+                    .iter()
+                    .find(|c| !c.is_whitespace())
+                    .copied()
+                    .or(next_char[idx]);
+
+                match roles.role(&word, next) {
+                    Some(role) => {
+                        if !run.is_empty() {
+                            out.push((style, std::mem::take(&mut run)));
+                        }
+
+                        out.push((role, word));
+                    }
+
+                    None => run.push_str(&word),
+                }
+
+                continue;
+            }
+
+            run.push(c);
+
+            i += 1;
+        }
+
+        if !run.is_empty() {
+            out.push((style, run));
+        }
+    }
+
+    out
+}
+
 fn convert_span(syn: SynStyle, text: &str) -> Option<(Style, String)> {
     let trimmed = text.trim_end_matches(['\n', '\r']);
 
     if trimmed.is_empty() {
         return None;
     }
+
+    Some((convert_style(syn), trimmed.to_string()))
+}
+
+fn convert_style(syn: SynStyle) -> Style {
 
     let fg = Color::Rgb(
         syn.foreground.r,
@@ -527,7 +708,7 @@ fn convert_span(syn: SynStyle, text: &str) -> Option<(Style, String)> {
         style = style.add_modifier(Modifier::UNDERLINED);
     }
 
-    Some((style, trimmed.to_string()))
+    style
 }
 
 #[cfg(test)]
@@ -561,6 +742,96 @@ mod tests {
 
 
 
+
+
+
+    /// The built-in grammars have gaps and disagree about them: syntect's Rust
+    /// never marks a type name and its C++ never marks a constant. The
+    /// enrichment pass fills those in by shape, for every language at once.
+    #[test]
+    fn plain_tokens_gain_a_role_in_any_language() {
+        use ropey::Rope;
+
+        let h = SyntaxHighlighter::new();
+
+        let hl = Highlighter::new(&h.themes[h.current].1);
+
+        let roles = Roles::for_theme(&hl);
+
+        for (lang, code, wanted) in [
+            ("Rust", "let sum = Value::new();\n", vec!["Value", "new"]),
+            ("C++", "Value sum = Value();\nsum.add(MAX_N);\n", vec!["MAX_N"]),
+            ("Solidity", "contract Vault {\n    uint256 MAX_N = 1;\n}\n", vec!["Vault", "MAX_N"]),
+        ] {
+            let rope = Rope::from_str(code);
+
+            let mut cache = HlCache::new(lang.to_string());
+
+            h.ensure(&mut cache, &rope, 5);
+
+            for token in wanted {
+                let found = (0..rope.len_lines())
+                    .filter_map(|l| cache.line(l))
+                    .flat_map(|spans| spans.iter())
+                    .find(|(_, t)| t.trim() == token);
+
+                let (style, _) = found.unwrap_or_else(|| panic!("{lang}: {token} is not a span of its own"));
+
+                assert_ne!(
+                    style.fg,
+                    Some(roles.plain),
+                    "{lang}: {token} is still painted as ordinary text"
+                );
+            }
+        }
+    }
+
+    /// The pass must only fill gaps. A token the grammar already coloured keeps
+    /// its colour, and prose in a file with no grammar is left alone.
+    #[test]
+    fn enrichment_never_overrides_the_grammar() {
+        use ropey::Rope;
+
+        let h = SyntaxHighlighter::new();
+
+        let hl = Highlighter::new(&h.themes[h.current].1);
+
+        let roles = Roles::for_theme(&hl);
+
+        // `fn` is a keyword and `"text"` a string: both already have a colour.
+        let rope = Rope::from_str("fn f() { let s = \"Value MAX_N\"; }\n");
+
+        let mut cache = HlCache::new("Rust".to_string());
+
+        h.ensure(&mut cache, &rope, 3);
+
+        let spans = cache.line(0).expect("highlighted");
+
+        let inside_string = spans
+            .iter()
+            .find(|(_, t)| t.contains("Value MAX_N"))
+            .expect("the string body stays one span");
+
+        assert_ne!(inside_string.0.fg, roles.class.fg, "words inside a string keep the string colour");
+
+        assert_ne!(inside_string.0.fg, roles.constant.fg, "and are not read as constants");
+
+        // Plain text has no grammar, so nothing should be recoloured.
+        let rope = Rope::from_str("Meeting notes: TODO ask Alice about Widget(x)\n");
+
+        let mut cache = HlCache::new("Plain Text".to_string());
+
+        h.ensure(&mut cache, &rope, 2);
+
+        let colours: std::collections::BTreeSet<_> = cache
+            .line(0)
+            .expect("highlighted")
+            .iter()
+            .map(|(s, _)| format!("{:?}", s.fg))
+            .collect();
+
+        assert_eq!(colours.len(), 1, "prose is left as prose: {colours:?}");
+    }
 
     /// A fenced block in Markdown is code, and should read as the language it
     /// says it is. syntect's Markdown grammar leaves it plain, so ocode drives
